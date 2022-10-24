@@ -1,5 +1,14 @@
 #!/bin/sh
 
+# This is a fork of the original script, with a few small fixes, mainly related to OWE transitional mode
+#  * check for full version of sed, since the original script fails with BusyBox-integrated sed
+#  * typo: missing blank before "]" when forcefully enabling OWE mode
+#  * .bssid property of WiFi I/F is only valid in STA and AdHoc mode - use .macaddr instead
+#  * enable OWE transition mode by default if any TLS-capable hostapd/wpad is installed
+#  * check radio state in OWE transition mode: both radios must be enabled for 2nd-boot config finalization to work
+#  * Use identical OWE SSID for 2G and 5G band, works more reliably for me
+# Original script without my fixes is available from https://github.com/jkool702/OpenWrt-guest_wifi/
+
 # set guest network SSID + router IP + netmask
 GuestWiFi_SSID='Guest_WiFi'
 GuestWiFi_IP='192.168.2.1'
@@ -11,14 +20,26 @@ GuestWiFi_netmask='255.255.255.0'
 use_OWE_flag=''
 
 # determine whether or not to use OWE 
-# if not explicitly defined, then it will be enabled if the full version of wpad or hostapd is present, and otherwise disabled
+# if not explicitly defined, it will be enabled if any WPA3-capable version of wpad or hostapd is present, otherwise disabled
 mkdir -p /var/lock
-if [ -z ${use_OWE_flag} ] || ! { [ "${use_OWE_flag}" == '0' ] || [ "${use_OWE_flag}" == '1']; }; then
+if [ -z ${use_OWE_flag} ] || ! { [ "${use_OWE_flag}" == '0' ] || [ "${use_OWE_flag}" == '1' ]; }; then
 	opkg list-installed | grep -E '((wpad)|(hostapd))' | grep -q -E '((mini)|(basic)|(mesh))' && use_OWE_flag='0' || use_OWE_flag='1'
+	opkg list-installed | grep -E '((wpad)|(hostapd))' | grep -q -E '((ssl)|(tls))' && use_OWE_flag='1'
 fi
 
 if [ "${use_OWE_flag}" == '0' ] || ! [ -f /root/guest-wifi-OWE-setup-2nd-reboot-flag ] ; then
-	
+
+# this script makes extensive use of "sed -z", which BusyBox doesn't support.
+[ -z "$(opkg list-installed | grep '^sed - ')" ] && {
+	echo "This script requires the full version of sed."$'\n'"Please install with 'opkg update; opkg install sed'"
+	exit 1
+}
+
+[ "${use_OWE_flag}" == '1' ] && [ "$(uci -q get wireless.radio0.disabled)" == '1' -o  "$(uci -q get wireless.radio1.disabled)" == '1' ] && {
+	echo "For use with OWE, please make sure both radios are enabled before running this script."
+	exit 1
+}
+
 	# setup network config
 	
 	uci -q delete network.guest_dev
@@ -78,8 +99,8 @@ EOI
 		# setup (most of) the OWE wireless config
 
 		uci batch << EOI
-set wireless.guest_radio0.owe_transition_ssid="${GuestWiFi_SSID}_OWE_5g"
-set wireless.guest_radio1.owe_transition_ssid="${GuestWiFi_SSID}_OWE_2g"
+set wireless.guest_radio0.owe_transition_ssid="${GuestWiFi_SSID}_OWE"
+set wireless.guest_radio1.owe_transition_ssid="${GuestWiFi_SSID}_OWE"
 EOI
 
 		uci -q delete wireless.guest_radio0_owe
@@ -88,7 +109,7 @@ set wireless.guest_radio0_owe=wifi-iface
 set wireless.guest_radio0_owe.device="$(uci get wireless.@wifi-iface[0].device)"
 set wireless.guest_radio0_owe.mode='ap'
 set wireless.guest_radio0_owe.network='guest'
-set wireless.guest_radio0_owe.ssid="${GuestWiFi_SSID}_OWE_5g"
+set wireless.guest_radio0_owe.ssid="${GuestWiFi_SSID}_OWE"
 set wireless.guest_radio0_owe.isolate='1'
 set wireless.guest_radio0_owe.encryption='owe'
 set wireless.guest_radio0_owe.hidden='1'
@@ -104,7 +125,7 @@ set wireless.guest_radio1_owe=wifi-iface
 set wireless.guest_radio1_owe.device="$(uci get wireless.@wifi-iface[1].device)"
 set wireless.guest_radio1_owe.mode='ap'
 set wireless.guest_radio1_owe.network='guest'
-set wireless.guest_radio1_owe.ssid="${GuestWiFi_SSID}_OWE_2g"
+set wireless.guest_radio1_owe.ssid="${GuestWiFi_SSID}_OWE"
 set wireless.guest_radio1_owe.isolate='1'
 set wireless.guest_radio1_owe.encryption='owe'
 set wireless.guest_radio1_owe.hidden='1'
@@ -405,19 +426,19 @@ else
 	iwinfo | sed -zE s/'\n[ \t]*Access Point\: '/' \-\- '/g | grep ESSID | grep "${GuestWiFi_SSID}" | awk -F '--' '{print $2}' | while read -r nn; 
 	do
 		if [ "${kk}" == '0' ]; then
-				uci set wireless.guest_radio0.bssid="${nn}"
+				uci set wireless.guest_radio0.macaddr="${nn}"
 				uci set wireless.guest_radio0_owe.owe_transition_bssid="${nn}"
 
 		elif [ "${kk}" == '1' ]; then
-				uci set wireless.guest_radio0_owe.bssid="${nn}"
+				uci set wireless.guest_radio0_owe.macaddr="${nn}"
 				uci set wireless.guest_radio0.owe_transition_bssid="${nn}"
 
 		elif [ "${kk}" == '2' ]; then
-				uci set wireless.guest_radio1.bssid="${nn}"
+				uci set wireless.guest_radio1.macaddr="${nn}"
 				uci set wireless.guest_radio1_owe.owe_transition_bssid="${nn}"
 
 		elif [ "${kk}" == '3' ]; then
-				uci set wireless.guest_radio1_owe.bssid="${nn}"
+				uci set wireless.guest_radio1_owe.macaddr="${nn}"
 				uci set wireless.guest_radio1.owe_transition_bssid="${nn}"
 		fi
 
