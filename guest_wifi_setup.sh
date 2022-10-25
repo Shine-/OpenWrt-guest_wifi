@@ -5,8 +5,9 @@
 #  * typo: missing blank before "]" when forcefully enabling OWE mode
 #  * .bssid property of WiFi I/F is only valid in STA and AdHoc mode - use .macaddr instead
 #  * enable OWE transition mode by default if any TLS-capable hostapd/wpad is installed
-#  * check radio state in OWE transition mode: both radios must be enabled for 2nd-boot config finalization to work
-#  * Use identical OWE SSID for 2G and 5G band, works more reliably for me
+#  * check radio state in OWE transition mode: both radios must be enabled to finish configuring the OWE SSIDs
+#  * use identical OWE SSID for 2G and 5G band, works more reliably for me
+#  * turn guest networks on/off with a helper script similar to OpenWrt's "wifi", instead of a system service
 # Original script without my fixes is available from https://github.com/jkool702/OpenWrt-guest_wifi/
 
 # set guest network SSID + router IP + netmask
@@ -71,6 +72,7 @@ EOI
 	uci -q delete wireless.guest_radio0
 	uci batch << EOI
 set wireless.guest_radio0=wifi-iface
+set wireless.guest_radio0.ifname=guestopen0
 set wireless.guest_radio0.device="$(uci get wireless.@wifi-iface[0].device)"
 set wireless.guest_radio0.mode='ap'
 set wireless.guest_radio0.network='guest'
@@ -84,6 +86,7 @@ EOI
 	uci -q delete wireless.guest_radio1
 	uci batch << EOI
 set wireless.guest_radio1=wifi-iface
+set wireless.guest_radio1.ifname=guestopen1
 set wireless.guest_radio1.device="$(uci get wireless.@wifi-iface[1].device)"
 set wireless.guest_radio1.mode='ap'
 set wireless.guest_radio1.network='guest'
@@ -106,6 +109,7 @@ EOI
 		uci -q delete wireless.guest_radio0_owe
 		uci batch << EOI
 set wireless.guest_radio0_owe=wifi-iface
+set wireless.guest_radio0_owe.ifname=guestowe0
 set wireless.guest_radio0_owe.device="$(uci get wireless.@wifi-iface[0].device)"
 set wireless.guest_radio0_owe.mode='ap'
 set wireless.guest_radio0_owe.network='guest'
@@ -122,6 +126,7 @@ EOI
 		uci -q delete wireless.guest_radio1_owe
 		uci batch << EOI
 set wireless.guest_radio1_owe=wifi-iface
+set wireless.guest_radio1_owe.ifname=guestowe1
 set wireless.guest_radio1_owe.device="$(uci get wireless.@wifi-iface[1].device)"
 set wireless.guest_radio1_owe.mode='ap'
 set wireless.guest_radio1_owe.network='guest'
@@ -221,181 +226,44 @@ EOI
 
 	# setup init script to bring guest wifi up/down
 
-	if [ "${use_OWE_flag}" == '0' ]; then
+		cat<<'EOF' | tee /sbin/guest_wifi
+#! /bin/sh
 
-		# version without OWE
+unset DISABLED
+[ -z "$1" ] && RESTART=1 || unset RESTART
 
-		cat<<'EOF' | tee /etc/init.d/guest_wifi
-#!/bin/sh /etc/rc.common
+case "$1" in
+	"restart")
+		RESTART='1'
+	;;
+	"disable")
+		DISABLED='1'
+	;;
+	"enable")
+		DISABLED='0'
+	;;
+	*)
+		[ -z "$RESTART" ] && { >&2 echo "Possible parameters: enable|disable|restart"; exit 1; }
+	;;
+esac
 
-NAME='guest_wifi'
-START=99
-STOP=99
-EXTRA_COMMANDS='up down'
+GUESTNETS=$(uci show wireless | grep ".ifname='guesto" | cut -f 2 -d '.')
+[ -z "$GUESTNETS" ] && { >&2 echo "No guest networks found, exiting."; exit 1; }
 
-start() {
-	if [ "$(echo $(uci show wireless | grep 'guest_radio' | grep 'disabled' | awk -F '=' '{print $2}' | sed -E s/"'"//g) | sed -E s/' '//g)" == '00' ]; 
-	then
-		echo "NOTICE: Guest Wifi already enabled in UCI config." >&2
-		
-		if [ "$(iw dev | grep ssid | grep "$(uci get wireless.guest_radio0.ssid)" | wc -l)" == '2' ] && [ "$(ifconfig | grep -E "$(echo $(iw dev | grep -E '(Interface)|(ssid)' | sed -zE s/'\n[ \t]+ssid'/' -- '/g | sed -E s/'^[ \t]*Interface '// | { grep "$(uci get wireless.guest_radio0.ssid)" || echo 'NONE -- NO MATCHES'; } | awk '{print $1}' | sed -E s/'(.*)'/'(\1)'/ ) | sed -E s/' '/'|'/g)" | wc -l)" == '2' ]; 
-		then
-			echo -e "Guest network appears to be up and running. \nIf it is not working, try running 'service guest_wifi restart' to cycle wifi off and on. \nIf this does not work, try rebooting the router. \n" >&2
-		else
-			
-			echo "Despite being enabled, guest network appears to be inactive. Router will reboot in 10 seconds" >&2
-			sleep 10
-			reboot
-		fi
-	else
-		uci set wireless.guest_radio0.disabled='0'
-		uci set wireless.guest_radio1.disabled='0'
-		uci commit wireless
-		reload_config
-		
-		echo "Guest network enabled. Router will reboot in 10 seconds" >&2
-		sleep 10
-		reboot
-	fi
-} 
-
-stop() {
-	if [ "$(echo $(uci show wireless | grep 'guest_radio' | grep 'disabled' | awk -F '=' '{print $2}' | sed -E s/"'"//g) | sed -E s/' '//g)" == '11' ]; 
-	then
-		echo "NOTICE: Guest Wifi already disabled in UCI config." >&2
-		
-		if [ "$(iw dev | grep ssid | grep "$(uci get wireless.guest_radio0.ssid)" | wc -l)" == '0' ] && [ "$(ifconfig | grep -E "$(echo $(iw dev | grep -E '(Interface)|(ssid)' | sed -zE s/'\n[ \t]+ssid'/' -- '/g | sed -E s/'^[ \t]*Interface '// | { grep "$(uci get wireless.guest_radio0.ssid)" || echo 'NONE -- NO MATCHES'; } | awk '{print $1}' | sed -E s/'(.*)'/'(\1)'/ ) | sed -E s/' '/'|'/g)" | wc -l)" == '0' ]; 
-		then
-			echo -e "Guest network appears to be fully shut down \nIf it is still running or something else isnt working with the wifi, try rebooting the router. \n" >&2
-		else
-			
-			echo "Despite being disabled, guest network appears to be active. Router will reboot in 10 seconds" >&2
-			sleep 10
-			reboot
-		fi
-	else
-		uci set wireless.guest_radio0.disabled='1'
-		uci set wireless.guest_radio1.disabled='1'
-		uci commit wireless
-		reload_config
-		
-		echo "Guest network disabled. Router will reboot in 10 seconds" >&2
-		sleep 10
-		reboot
-	fi
+[ -z "$DISABLED" ] || {
+	for GUESTNET in $GUESTNETS; do
+		[ "0$(uci -q get wireless.$GUESTNET.disabled)" -eq $DISABLED ] || {
+			uci set wireless.$GUESTNET.disabled="$DISABLED"
+		}
+	done
+	uci commit wireless
 }
 
-restart() {
-	if [ "$(echo $(uci show wireless | grep 'guest_radio' | grep 'disabled' | awk -F '=' '{print $2}' | sed -E s/"'"//g) | sed -E s/' '//g)" == '00' ] && [ "$(iw dev | grep ssid | grep "$(uci get wireless.guest_radio0.ssid)" | wc -l)" == '2' ] && [ "$(ifconfig | grep -E "$(echo $(iw dev | grep -E '(Interface)|(ssid)' | sed -zE s/'\n[ \t]+ssid'/' -- '/g | sed -E s/'^[ \t]*Interface '// | { grep "$(uci get wireless.guest_radio0.ssid)" || echo 'NONE -- NO MATCHES'; } | awk '{print $1}' | sed -E s/'(.*)'/'(\1)'/ ) | sed -E s/' '/'|'/g)" | wc -l)" == '2' ]; 
-	then
-		wifi down
-		sleep 5
-		wifi up
-	else
-		start
-	fi
-}
-
-up() {
-	start
-}
-
-down() {
-	stop
-}
+RADIOS=$(for GUESTNET in $GUESTNETS; do uci get wireless.${GUESTNET}.device; done | sort -u)
+for RADIO in $RADIOS; do wifi up $RADIO; done
 EOF
 
-	else	
-
-		# version with OWE
-
-		cat<<'EOF' | tee /etc/init.d/guest_wifi
-#!/bin/sh /etc/rc.common
-
-NAME='guest_wifi'
-START=99
-STOP=99
-EXTRA_COMMANDS='up down'
-
-start() {
-	if [ "$(echo $(uci show wireless | grep 'guest_radio' | grep 'disabled' | awk -F '=' '{print $2}' | sed -E s/"'"//g) | sed -E s/' '//g)" == '0000' ]; 
-	then
-		echo "NOTICE: Guest Wifi already enabled in UCI config." >&2
-		
-		if [ "$(iw dev | grep ssid | grep "$(uci get wireless.guest_radio0.ssid)" | wc -l)" == '4' ] && [ "$(ifconfig | grep -E "$(echo $(iw dev | grep -E '(Interface)|(ssid)' | sed -zE s/'\n[ \t]+ssid'/' -- '/g | sed -E s/'^[ \t]*Interface '// | { grep "$(uci get wireless.guest_radio0.ssid)" || echo 'NONE -- NO MATCHES'; } | awk '{print $1}' | sed -E s/'(.*)'/'(\1)'/ ) | sed -E s/' '/'|'/g)" | wc -l)" == '4' ]; 
-		then
-			echo -e "Guest network appears to be up and running. \nIf it is not working, try running 'service guest_wifi restart' to cycle wifi off and on. \nIf this does not work, try rebooting the router. \n" >&2
-		else
-			
-			echo "Despite being enabled, guest network appears to be inactive. Router will reboot in 10 seconds" >&2
-			sleep 10
-			reboot
-		fi
-	else
-		uci set wireless.guest_radio0.disabled='0'
-		uci set wireless.guest_radio0_owe.disabled='0'
-		uci set wireless.guest_radio1.disabled='0'
-		uci set wireless.guest_radio1_owe.disabled='0'
-		uci commit wireless
-		reload_config
-		
-		echo "Guest network enabled. Router will reboot in 10 seconds" >&2
-		sleep 10
-		reboot
-	fi
-} 
-
-stop() {
-	if [ "$(echo $(uci show wireless | grep 'guest_radio' | grep 'disabled' | awk -F '=' '{print $2}' | sed -E s/"'"//g) | sed -E s/' '//g)" == '1111' ]; 
-	then
-		echo "NOTICE: Guest Wifi already disabled in UCI config." >&2
-		
-		if [ "$(iw dev | grep ssid | grep "$(uci get wireless.guest_radio0.ssid)" | wc -l)" == '0' ] && [ "$(ifconfig | grep -E "$(echo $(iw dev | grep -E '(Interface)|(ssid)' | sed -zE s/'\n[ \t]+ssid'/' -- '/g | sed -E s/'^[ \t]*Interface '// | { grep "$(uci get wireless.guest_radio0.ssid)" || echo 'NONE -- NO MATCHES'; } | awk '{print $1}' | sed -E s/'(.*)'/'(\1)'/ ) | sed -E s/' '/'|'/g)" | wc -l)" == '0' ]; 
-		then
-			echo -e "Guest network appears to be fully shut down \nIf it is still running or something else isnt working with the wifi, try rebooting the router. \n" >&2
-		else
-			
-			echo "Despite being disabled, guest network appears to be active. Router will reboot in 10 seconds" >&2
-			sleep 10
-			reboot
-		fi
-	else
-		uci set wireless.guest_radio0.disabled='1'
-		uci set wireless.guest_radio0_owe.disabled='1'
-		uci set wireless.guest_radio1.disabled='1'
-		uci set wireless.guest_radio1_owe.disabled='1'
-		uci commit wireless
-		reload_config
-		
-		echo "Guest network disabled. Router will reboot in 10 seconds" >&2
-		sleep 10
-		reboot
-	fi
-}
-
-restart() {
-	if [ "$(echo $(uci show wireless | grep 'guest_radio' | grep 'disabled' | awk -F '=' '{print $2}' | sed -E s/"'"//g) | sed -E s/' '//g)" == '0000' ] && [ "$(iw dev | grep ssid | grep "$(uci get wireless.guest_radio0.ssid)" | wc -l)" == '4' ] && [ "$(ifconfig | grep -E "$(echo $(iw dev | grep -E '(Interface)|(ssid)' | sed -zE s/'\n[ \t]+ssid'/' -- '/g | sed -E s/'^[ \t]*Interface '// | { grep "$(uci get wireless.guest_radio0.ssid)" || echo 'NONE -- NO MATCHES'; } | awk '{print $1}' | sed -E s/'(.*)'/'(\1)'/ ) | sed -E s/' '/'|'/g)" | wc -l)" == '4' ]; 
-	then
-		wifi down
-		sleep 5
-		wifi up
-	else
-		start
-	fi
-}
-
-up() {
-	start
-}
-
-down() {
-	stop
-}
-EOF
-
-	fi
-
-	chmod +x /etc/init.d/guest_wifi
+	chmod 755 /sbin/guest_wifi
 
 	if [ "${use_OWE_flag}" == '1' ]; then
 		# setup to continue this script after reboot via /etc/rc.local
@@ -410,7 +278,7 @@ EOF
 	
 	sleep 5
 	
-	/etc/init.d/guest_wifi up
+	/sbin/guest_wifi enable
 	
 else
 	
@@ -457,4 +325,3 @@ fi
 
 sleep 5
 reboot
-
