@@ -1,14 +1,16 @@
 #!/bin/sh
 
-# This is a fork of the original script, with a few small fixes, mainly related to OWE transitional mode
-#  * check for full version of sed, since the original script fails with BusyBox-integrated sed
-#  * typo: missing blank before "]" when forcefully enabling OWE mode
-#  * .bssid property of WiFi I/F is only valid in STA and AdHoc mode - use .macaddr instead
+# This is a fork of the original script, with a some fixes and rewrites, many of them related to OWE transitional mode
+#  * typo in original script: missing blank before "]" when forcefully enabling OWE mode
+#  * original script uses .bssid property of WiFi I/F, which is only valid in STA and AdHoc mode - use .macaddr instead
 #  * enable OWE transition mode by default if any TLS-capable hostapd/wpad is installed
-#  * check radio state in OWE transition mode: both radios must be enabled to finish configuring the OWE SSIDs
 #  * use identical OWE SSID for 2G and 5G band, works more reliably for me
 #  * turn guest networks on/off with a helper script similar to OpenWrt's "wifi", instead of a system service
-# Original script without my fixes is available from https://github.com/jkool702/OpenWrt-guest_wifi/
+#  * rewrite guest Open WiFi and OWE setup to support any number of radios
+#  * use randomized OWE transition BSSIDs to prevent BSSID collision with default and/or manually set up WiFi networks
+#  * get rid of all dependencies on the full version of sed
+#  * get rid of all the reboots that the original script performs, as none of them is necessary
+# Original script without my fixes/changes is available from https://github.com/jkool702/OpenWrt-guest_wifi/
 
 # set guest network SSID + router IP + netmask
 GuestWiFi_SSID='Guest_WiFi'
@@ -22,37 +24,23 @@ use_OWE_flag=''
 
 # determine whether or not to use OWE 
 # if not explicitly defined, it will be enabled if any WPA3-capable version of wpad or hostapd is present, otherwise disabled
-mkdir -p /var/lock
 if [ -z ${use_OWE_flag} ] || ! { [ "${use_OWE_flag}" == '0' ] || [ "${use_OWE_flag}" == '1' ]; }; then
 	opkg list-installed | grep -E '((wpad)|(hostapd))' | grep -q -E '((mini)|(basic)|(mesh))' && use_OWE_flag='0' || use_OWE_flag='1'
 	opkg list-installed | grep -E '((wpad)|(hostapd))' | grep -q -E '((ssl)|(tls))' && use_OWE_flag='1'
 fi
 
-if [ "${use_OWE_flag}" == '0' ] || ! [ -f /root/guest-wifi-OWE-setup-2nd-reboot-flag ] ; then
+# setup network config
 
-# this script makes extensive use of "sed -z", which BusyBox doesn't support.
-[ -z "$(opkg list-installed | grep '^sed - ')" ] && {
-	echo "This script requires the full version of sed."$'\n'"Please install with 'opkg update; opkg install sed'"
-	exit 1
-}
-
-[ "${use_OWE_flag}" == '1' ] && [ "$(uci -q get wireless.radio0.disabled)" == '1' -o  "$(uci -q get wireless.radio1.disabled)" == '1' ] && {
-	echo "For use with OWE, please make sure both radios are enabled before running this script."
-	exit 1
-}
-
-	# setup network config
-	
-	uci -q delete network.guest_dev
-	uci batch << EOI
+uci -q delete network.guest_dev
+uci batch << EOI
 set network.guest_dev=device
 set network.guest_dev.type='bridge'
 set network.guest_dev.name='br-guest'
 set network.guest_dev.bridge_empty='1'
 EOI
 
-	uci -q delete network.guest
-	uci batch << EOI
+uci -q delete network.guest
+uci batch << EOI
 set network.guest=interface
 set network.guest.proto='static'
 set network.guest.device='br-guest'
@@ -65,89 +53,76 @@ add_list network.guest.dns="${GuestWiFi_IP}"
 
 EOI
 
-	uci commit network
+uci commit network
 
-	# setup wireless config
+# setup wireless config
 
-	uci -q delete wireless.guest_radio0
+RNG='/dev/urandom'; [ -c /dev/hwrng ] && RNG='/dev/hwrng'
+
+. /lib/functions.sh; config_load wireless
+ALLRADIOS=$(config_foreach echo 'wifi-device')
+
+for RADIO in $ALLRADIOS; do
+
+	uci -q delete wireless.guest_${RADIO}
 	uci batch << EOI
-set wireless.guest_radio0=wifi-iface
-set wireless.guest_radio0.ifname=guestopen0
-set wireless.guest_radio0.device="$(uci get wireless.@wifi-iface[0].device)"
-set wireless.guest_radio0.mode='ap'
-set wireless.guest_radio0.network='guest'
-set wireless.guest_radio0.ssid="${GuestWiFi_SSID}"
-set wireless.guest_radio0.isolate='1'
-set wireless.guest_radio0.encryption='open'
-set wireless.guest_radio0.na_mcast_to_ucast='1'
-set wireless.guest_radio0.disabled='1'
+set wireless.guest_${RADIO}=wifi-iface
+set wireless.guest_${RADIO}.ifname=guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)
+set wireless.guest_${RADIO}.device="${RADIO}"
+set wireless.guest_${RADIO}.mode='ap'
+set wireless.guest_${RADIO}.network='guest'
+set wireless.guest_${RADIO}.ssid="${GuestWiFi_SSID}"
+set wireless.guest_${RADIO}.isolate='1'
+set wireless.guest_${RADIO}.encryption='none'
+set wireless.guest_${RADIO}.na_mcast_to_ucast='1'
+set wireless.guest_${RADIO}.disabled='1'
 EOI
 
-	uci -q delete wireless.guest_radio1
-	uci batch << EOI
-set wireless.guest_radio1=wifi-iface
-set wireless.guest_radio1.ifname=guestopen1
-set wireless.guest_radio1.device="$(uci get wireless.@wifi-iface[1].device)"
-set wireless.guest_radio1.mode='ap'
-set wireless.guest_radio1.network='guest'
-set wireless.guest_radio1.ssid="${GuestWiFi_SSID}"
-set wireless.guest_radio1.isolate='1'
-set wireless.guest_radio1.encryption='open'
-set wireless.guest_radio1.na_mcast_to_ucast='1'
-set wireless.guest_radio1.disabled='1'
-EOI
+	[ "${use_OWE_flag}" == '1' ] && {
 
-	if [ "${use_OWE_flag}" == '1' ]; then
-
-		# setup (most of) the OWE wireless config
+		# generate random BSSID prefix (first 5 bytes) in LAA range
+		unset BSSID
+		while [ -z "$(echo \"$BSSID\" | grep -E '[0-9a-fA-F][26aeAE]')" ]; do BSSID=$(head -c1 $RNG | hexdump -ve '/1 "%02x"'); done
+		BSSID=${BSSID}:$(head -c4 $RNG | hexdump -ve '/1 "%02x:"')
+		# generate random byte to complete BSSID for Open network
+		BSSIDA=$(head -c1 $RNG | hexdump -ve '/1 "%02x"')
+		# generate another random byte to complete BSSID for OWE network
+		BSSIDB=$BSSIDA
+		while [ "$BSSIDA" = "$BSSIDB" ]; do BSSIDB=$(head -c1 $RNG | hexdump -ve '/1 "%02x"'); done
 
 		uci batch << EOI
-set wireless.guest_radio0.owe_transition_ssid="${GuestWiFi_SSID}_OWE"
-set wireless.guest_radio1.owe_transition_ssid="${GuestWiFi_SSID}_OWE"
+set wireless.guest_${RADIO}.macaddr=${BSSID}${BSSIDA}
+set wireless.guest_${RADIO}.owe_transition_ssid="${GuestWiFi_SSID}_OWE"
+set wireless.guest_${RADIO}.owe_transition_bssid=${BSSID}${BSSIDB}
 EOI
 
-		uci -q delete wireless.guest_radio0_owe
+		uci -q delete wireless.guest_${RADIO}_owe
 		uci batch << EOI
-set wireless.guest_radio0_owe=wifi-iface
-set wireless.guest_radio0_owe.ifname=guestowe0
-set wireless.guest_radio0_owe.device="$(uci get wireless.@wifi-iface[0].device)"
-set wireless.guest_radio0_owe.mode='ap'
-set wireless.guest_radio0_owe.network='guest'
-set wireless.guest_radio0_owe.ssid="${GuestWiFi_SSID}_OWE"
-set wireless.guest_radio0_owe.isolate='1'
-set wireless.guest_radio0_owe.encryption='owe'
-set wireless.guest_radio0_owe.hidden='1'
-set wireless.guest_radio0_owe.owe_transition_ssid="${GuestWiFi_SSID}"
-set wireless.guest_radio0_owe.ieee80211w='2'
-set wireless.guest_radio0_owe.na_mcast_to_ucast='1'
-set wireless.guest_radio0_owe.disabled='1'
+set wireless.guest_${RADIO}_owe=wifi-iface
+set wireless.guest_${RADIO}_owe.ifname=guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)
+set wireless.guest_${RADIO}_owe.device="${RADIO}"
+set wireless.guest_${RADIO}_owe.mode='ap'
+set wireless.guest_${RADIO}_owe.network='guest'
+set wireless.guest_${RADIO}_owe.ssid="${GuestWiFi_SSID}_OWE"
+set wireless.guest_${RADIO}_owe.isolate='1'
+set wireless.guest_${RADIO}_owe.encryption='owe'
+set wireless.guest_${RADIO}_owe.hidden='1'
+set wireless.guest_${RADIO}_owe.macaddr=${BSSID}${BSSIDB}
+set wireless.guest_${RADIO}_owe.owe_transition_ssid="${GuestWiFi_SSID}"
+set wireless.guest_${RADIO}_owe.owe_transition_bssid=${BSSID}${BSSIDA}
+set wireless.guest_${RADIO}_owe.ieee80211w='2'
+set wireless.guest_${RADIO}_owe.na_mcast_to_ucast='1'
+set wireless.guest_${RADIO}_owe.disabled='1'
 EOI
+	}
+done
 
-		uci -q delete wireless.guest_radio1_owe
-		uci batch << EOI
-set wireless.guest_radio1_owe=wifi-iface
-set wireless.guest_radio1_owe.ifname=guestowe1
-set wireless.guest_radio1_owe.device="$(uci get wireless.@wifi-iface[1].device)"
-set wireless.guest_radio1_owe.mode='ap'
-set wireless.guest_radio1_owe.network='guest'
-set wireless.guest_radio1_owe.ssid="${GuestWiFi_SSID}_OWE"
-set wireless.guest_radio1_owe.isolate='1'
-set wireless.guest_radio1_owe.encryption='owe'
-set wireless.guest_radio1_owe.hidden='1'
-set wireless.guest_radio1_owe.owe_transition_ssid="${GuestWiFi_SSID}"
-set wireless.guest_radio1_owe.ieee80211w='2'
-set wireless.guest_radio1_owe.na_mcast_to_ucast='1'
-set wireless.guest_radio1_owe.disabled='1'
-EOI
+uci commit wireless
 
-	fi
+# setup dhcp config
 
-	uci commit wireless
-
-	# setup dhcp config
-
-	uci -q delete dhcp.guest
-	uci batch << EOI
+uci -q delete dhcp.guest
+uci batch << EOI
 set dhcp.guest=dhcp
 set dhcp.guest.interface='guest'
 set dhcp.guest.start='100'
@@ -168,12 +143,12 @@ add_list dhcp.guest.dhcp_option="3,${GuestWiFi_IP}"
 add_list dhcp.guest.dhcp_option="6,${GuestWiFi_IP}"
 EOI
 
-	uci commit dhcp
+uci commit dhcp
 
-	# setup firewall config
+# setup firewall config
 
-	uci -q delete firewall.guest
-	uci batch << EOI
+uci -q delete firewall.guest
+uci batch << EOI
 set firewall.guest=zone
 set firewall.guest.name='guest'
 set firewall.guest.network='guest'
@@ -182,15 +157,15 @@ set firewall.guest.output='ACCEPT'
 set firewall.guest.forward='REJECT'
 EOI
 
-	uci -q delete firewall.guest_wan
-	uci batch << EOI
+uci -q delete firewall.guest_wan
+uci batch << EOI
 set firewall.guest_wan=forwarding
 set firewall.guest_wan.src='guest'
 set firewall.guest_wan.dest='wan'
 EOI
 
-	uci -q delete firewall.guest_dhcp
-	uci batch << EOI
+uci -q delete firewall.guest_dhcp
+uci batch << EOI
 set firewall.guest_dhcp=rule
 set firewall.guest_dhcp.name='Allow-DHCP-guest'
 set firewall.guest_dhcp.src='guest'
@@ -201,8 +176,8 @@ set firewall.guest_dhcp.dest_port='67-68'
 set firewall.guest_dhcp.proto='udp'
 EOI
 
-	uci -q delete firewall.guest_dhcpv6
-	uci batch << EOI
+uci -q delete firewall.guest_dhcpv6
+uci batch << EOI
 set firewall.guest_dhcpv6=rule
 set firewall.guest_dhcpv6.name='Allow-DHCPv6-guest'
 set firewall.guest_dhcpv6.src='guest'
@@ -212,8 +187,8 @@ set firewall.guest_dhcpv6.family='ipv6'
 set firewall.guest_dhcpv6.target='ACCEPT'
 EOI
 
-	uci -q delete firewall.guest_dns
-	uci batch << EOI
+uci -q delete firewall.guest_dns
+uci batch << EOI
 set firewall.guest_dns=rule
 set firewall.guest_dns.name='Allow-DNS-guest'
 set firewall.guest_dns.src='guest'
@@ -222,11 +197,11 @@ set firewall.guest_dns.proto='tcp udp'
 set firewall.guest_dns.target='ACCEPT'
 EOI
 
-	uci commit firewall
+uci commit firewall
 
-	# setup init script to bring guest wifi up/down
+# setup init script to bring guest wifi up/down
 
-		cat<<'EOF' | tee /sbin/guest_wifi
+	cat<<'EOF' > /sbin/guest_wifi
 #! /bin/sh
 
 unset DISABLED
@@ -235,19 +210,19 @@ unset DISABLED
 case "$1" in
 	"restart")
 		RESTART='1'
-	;;
+		;;
 	"disable")
 		DISABLED='1'
-	;;
+		;;
 	"enable")
 		DISABLED='0'
-	;;
+		;;
 	*)
 		[ -z "$RESTART" ] && { >&2 echo "Possible parameters: enable|disable|restart"; exit 1; }
-	;;
+		;;
 esac
 
-GUESTNETS=$(uci show wireless | grep ".ifname='guesto" | cut -f 2 -d '.')
+GUESTNETS=$(uci show wireless | grep -E "\.ifname='guest[0-9A-F]{4}'$" | cut -f 2 -d '.')
 [ -z "$GUESTNETS" ] && { >&2 echo "No guest networks found, exiting."; exit 1; }
 
 [ -z "$DISABLED" ] || {
@@ -263,65 +238,9 @@ RADIOS=$(for GUESTNET in $GUESTNETS; do uci get wireless.${GUESTNET}.device; don
 for RADIO in $RADIOS; do wifi up $RADIO; done
 EOF
 
-	chmod 755 /sbin/guest_wifi
+chmod 755 /sbin/guest_wifi
 
-	if [ "${use_OWE_flag}" == '1' ]; then
-		# setup to continue this script after reboot via /etc/rc.local
-		touch /root/guest-wifi-OWE-setup-2nd-reboot-flag
-		
-		[ -f /etc/rc.local ] || { echo 'exit 0' > /etc/rc.local; chmod +x /etc/rc.local; }
-		rc_local="$(cat /etc/rc.local | grep -v 'exit 0'; echo 'sleep 20'; echo "chmod +x \"$(readlink -f $0)\""; echo "$(readlink -f $0)"; echo 'exit 0')"
-		mv /etc/rc.local /etc/rc.local.orig
-		echo "${rc_local}" > /etc/rc.local
-		chmod +x /etc/rc.local
-	fi
-	
-	sleep 5
-	
-	/sbin/guest_wifi enable
-	
-else
-	
-	# script to run after 1st reboot for OWE setup (requires a 2nd reboot)
-	# It is done like this to ensure that the hard-coded BSSIDs in wireless config 
-	# match the BSSIDs that would have been automatically used by the interfaces
-	#
-	# This *should* get run automatically after the 1st reboot, via a temporary alteration to /etc/rc.local
-	
-	echo "Running 2nd part setup script -- required to set OWE BSSID's" >&2
-
-	kk=0
-	iwinfo | sed -zE s/'\n[ \t]*Access Point\: '/' \-\- '/g | grep ESSID | grep "${GuestWiFi_SSID}" | awk -F '--' '{print $2}' | while read -r nn; 
-	do
-		if [ "${kk}" == '0' ]; then
-				uci set wireless.guest_radio0.macaddr="${nn}"
-				uci set wireless.guest_radio0_owe.owe_transition_bssid="${nn}"
-
-		elif [ "${kk}" == '1' ]; then
-				uci set wireless.guest_radio0_owe.macaddr="${nn}"
-				uci set wireless.guest_radio0.owe_transition_bssid="${nn}"
-
-		elif [ "${kk}" == '2' ]; then
-				uci set wireless.guest_radio1.macaddr="${nn}"
-				uci set wireless.guest_radio1_owe.owe_transition_bssid="${nn}"
-
-		elif [ "${kk}" == '3' ]; then
-				uci set wireless.guest_radio1_owe.macaddr="${nn}"
-				uci set wireless.guest_radio1.owe_transition_bssid="${nn}"
-		fi
-
-		kk=$((( $kk + 1 )))
-		
-	done
-	
-	uci commit wireless
-	
-	mv /etc/rc.local.orig /etc/rc.local
-	rm -f /root/guest-wifi-OWE-setup-2nd-reboot-flag
-	
-fi
-
-# reboot to apply changes
-
-sleep 5
-reboot
+/etc/init.d/odhcpd restart >/dev/null 2>&1
+/etc/init.d/dnsmasq restart >/dev/null 2>&1
+/etc/init.d/firewall restart >/dev/null 2>&1
+/sbin/guest_wifi enable
