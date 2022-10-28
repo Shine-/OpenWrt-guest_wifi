@@ -1,15 +1,18 @@
 #!/bin/sh
 
-# This is a fork of the original script, with a some fixes and rewrites, many of them related to OWE transitional mode
+# This is a fork of the original script, with some fixes and rewrites, many of them related to OWE transitional mode
 #  * typo in original script: missing blank before "]" when forcefully enabling OWE mode
 #  * original script uses .bssid property of WiFi I/F, which is only valid in STA and AdHoc mode - use .macaddr instead
 #  * enable OWE transition mode by default if any TLS-capable hostapd/wpad is installed
 #  * use identical OWE SSID for 2G and 5G band, works more reliably for me
 #  * turn guest networks on/off with a helper script similar to OpenWrt's "wifi", instead of a system service
 #  * rewrite guest Open WiFi and OWE setup to support any number of radios
-#  * use randomized OWE transition BSSIDs to prevent BSSID collision with default and/or manually set up WiFi networks
 #  * get rid of all dependencies on the full version of sed
 #  * get rid of all the reboots that the original script performs, as none of them is necessary
+#  * invalid value "open" in .encryption property for Open WiFi I/F - use "none" instead
+#  * hostapd option na_mcast_to_ucast is not a property supported by UCI - removed
+#  * use randomized OWE transition BSSIDs to prevent BSSID collision with default and/or manually defined WiFi networks
+#    or, if supported (version 22.03-rc5+), let OpenWrt manage OWE transition instead of using fixed SSID/BSSID assignment
 # Original script without my fixes/changes is available from https://github.com/jkool702/OpenWrt-guest_wifi/
 
 # set guest network SSID + router IP + netmask
@@ -17,17 +20,26 @@ GuestWiFi_SSID='Guest_WiFi'
 GuestWiFi_IP='192.168.2.1'
 GuestWiFi_netmask='255.255.255.0'
 
-# explicity set whether or not to use OWE 
-# '1' --> use OWE  /  '0' --> dont use OWE 
-# <blank>/<anything else> --> auto-determine based on wpad/hostapd version
+# by setting the below variable, you can forcibly enable/disable OWE transition mode
+#  empty         = autodetect based on OpenWrt version and wpad/hostapd variant with SAE (WPA3) support
+#  '1'           = use OWE and generate randomized transition BSSIDs (requires OpenWrt 19.07 or newer)
+#  '2'           = use OWE and let OpenWrt assign transition BSSIDs (requires OpenWrt 22.03.0-rc5 or newer)
+#  anything else = create unencrypted Open guest WiFi only
 use_OWE_flag=''
 
-# determine whether or not to use OWE 
-# if not explicitly defined, it will be enabled if any WPA3-capable version of wpad or hostapd is present, otherwise disabled
-if [ -z ${use_OWE_flag} ] || ! { [ "${use_OWE_flag}" == '0' ] || [ "${use_OWE_flag}" == '1' ]; }; then
-	opkg list-installed | grep -E '((wpad)|(hostapd))' | grep -q -E '((mini)|(basic)|(mesh))' && use_OWE_flag='0' || use_OWE_flag='1'
-	opkg list-installed | grep -E '((wpad)|(hostapd))' | grep -q -E '((ssl)|(tls))' && use_OWE_flag='1'
-fi
+# determine whether to use OWE transition mode, based on version, wpad/hostapd variant, or forced setting
+[ -z "$use_OWE_flag" ] && {
+	eval $(cat /etc/openwrt_release | grep -E '^DISTRIB_RE(LEASE|VISION)=')
+	REV=${DISTRIB_REVISION/[+-]*/}; REV=${REV#r}; [ -n "$REV" ] && [[ "$REV" =~ "^[0-9]*$" ]] || unset REV
+	case $DISTRIB_RELEASE in
+		SNAPSHOT) [ -n "$REV" ] && [ "$REV" -lt "19805" ] && use_OWE_flag='1' || use_OWE_flag='2' ;;
+		[0-9]|1[0-8].*) use_OWE_flag='0' ;;
+		19.*|21.*) use_OWE_flag='1' ;;
+		22.*) [ -n "$REV" ] && [ "$REV" -lt "19446" ] && use_OWE_flag='1' || use_OWE_flag='2' ;;
+		*) use_OWE_flag='2' ;;
+	esac
+	[ -z "$({ opkg list-installed wpad*; opkg list-installed hostapd*; } | cut -f 1 -d ' ' | grep -E '^hostapd$|^wpad$|ssl$|tls$')" ] && use_OWE_flag='0'
+}
 
 # setup network config
 
@@ -58,27 +70,48 @@ uci commit network
 # setup wireless config
 
 RNG='/dev/urandom'; [ -c /dev/hwrng ] && RNG='/dev/hwrng'
-
 . /lib/functions.sh; config_load wireless
 ALLRADIOS=$(config_foreach echo 'wifi-device')
 
 for RADIO in $ALLRADIOS; do
 
+	# create Open Network (unencrypted) SSID
+	IFNAMEA="guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)"
 	uci -q delete wireless.guest_${RADIO}
 	uci batch << EOI
 set wireless.guest_${RADIO}=wifi-iface
-set wireless.guest_${RADIO}.ifname=guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)
+set wireless.guest_${RADIO}.ifname="${IFNAMEA}"
 set wireless.guest_${RADIO}.device="${RADIO}"
 set wireless.guest_${RADIO}.mode='ap'
 set wireless.guest_${RADIO}.network='guest'
 set wireless.guest_${RADIO}.ssid="${GuestWiFi_SSID}"
 set wireless.guest_${RADIO}.isolate='1'
 set wireless.guest_${RADIO}.encryption='none'
-set wireless.guest_${RADIO}.na_mcast_to_ucast='1'
 set wireless.guest_${RADIO}.disabled='1'
 EOI
 
-	[ "${use_OWE_flag}" == '1' ] && {
+	# create Enhanced Open (OWE) SSID
+	[ "${use_OWE_flag}" = "1" -o "${use_OWE_flag}" = "2" ] && {
+
+		IFNAMEB="guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)"
+		uci -q delete wireless.guest_${RADIO}_owe
+		uci batch << EOI
+set wireless.guest_${RADIO}_owe=wifi-iface
+set wireless.guest_${RADIO}_owe.ifname="${IFNAMEB}"
+set wireless.guest_${RADIO}_owe.device="${RADIO}"
+set wireless.guest_${RADIO}_owe.mode='ap'
+set wireless.guest_${RADIO}_owe.network='guest'
+set wireless.guest_${RADIO}_owe.ssid="${GuestWiFi_SSID}_OWE"
+set wireless.guest_${RADIO}_owe.isolate='1'
+set wireless.guest_${RADIO}_owe.encryption='owe'
+set wireless.guest_${RADIO}_owe.hidden='1'
+set wireless.guest_${RADIO}_owe.ieee80211w='2'
+set wireless.guest_${RADIO}_owe.disabled='1'
+EOI
+	}
+
+	# enable OWE transition using randomly generated BSSIDs (requires OpenWrt 19.07 or newer)
+	[ "${use_OWE_flag}" = "1" ] && {
 
 		# generate random BSSID prefix (first 5 bytes) in LAA range
 		unset BSSID
@@ -94,27 +127,20 @@ EOI
 set wireless.guest_${RADIO}.macaddr=${BSSID}${BSSIDA}
 set wireless.guest_${RADIO}.owe_transition_ssid="${GuestWiFi_SSID}_OWE"
 set wireless.guest_${RADIO}.owe_transition_bssid=${BSSID}${BSSIDB}
-EOI
-
-		uci -q delete wireless.guest_${RADIO}_owe
-		uci batch << EOI
-set wireless.guest_${RADIO}_owe=wifi-iface
-set wireless.guest_${RADIO}_owe.ifname=guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)
-set wireless.guest_${RADIO}_owe.device="${RADIO}"
-set wireless.guest_${RADIO}_owe.mode='ap'
-set wireless.guest_${RADIO}_owe.network='guest'
-set wireless.guest_${RADIO}_owe.ssid="${GuestWiFi_SSID}_OWE"
-set wireless.guest_${RADIO}_owe.isolate='1'
-set wireless.guest_${RADIO}_owe.encryption='owe'
-set wireless.guest_${RADIO}_owe.hidden='1'
 set wireless.guest_${RADIO}_owe.macaddr=${BSSID}${BSSIDB}
 set wireless.guest_${RADIO}_owe.owe_transition_ssid="${GuestWiFi_SSID}"
 set wireless.guest_${RADIO}_owe.owe_transition_bssid=${BSSID}${BSSIDA}
-set wireless.guest_${RADIO}_owe.ieee80211w='2'
-set wireless.guest_${RADIO}_owe.na_mcast_to_ucast='1'
-set wireless.guest_${RADIO}_owe.disabled='1'
 EOI
 	}
+	[ "${use_OWE_flag}" = "2" ] && {
+
+	# enable OWE transition management (SSID/BSSID) by OpenWrt (requires OpenWrt 22.03.0-rc5 or newer)
+		uci batch << EOI
+set wireless.guest_${RADIO}.owe_transition_ifname="${IFNAMEB}"
+set wireless.guest_${RADIO}_owe.owe_transition_ifname="${IFNAMEA}"
+EOI
+	}
+
 done
 
 uci commit wireless
