@@ -13,6 +13,7 @@
 #  * hostapd option na_mcast_to_ucast is not a property supported by UCI - removed
 #  * use randomized OWE transition BSSIDs to prevent BSSID collision with default and/or manually defined WiFi networks
 #    or, if supported (version 22.03-rc5+), let OpenWrt manage OWE transition instead of using fixed SSID/BSSID assignment
+#  * clean up network config, remove some invalid options and make compatible with earlier OpenWrt versions
 # Original script without my fixes/changes is available from https://github.com/jkool702/OpenWrt-guest_wifi/
 
 # set guest network SSID + router IP + netmask
@@ -30,7 +31,7 @@ use_OWE_flag=''
 # determine whether to use OWE transition mode, based on version, wpad/hostapd variant, or forced setting
 [ -z "$use_OWE_flag" ] && {
 	eval $(cat /etc/openwrt_release | grep -E '^DISTRIB_RE(LEASE|VISION)=')
-	REV=${DISTRIB_REVISION/[+-]*/}; REV=${REV#r}; [ -n "$REV" ] && [[ "$REV" =~ "^[0-9]*$" ]] || unset REV
+	REV=${DISTRIB_REVISION/[+-]*/}; REV=${REV#r}; [ -n "$REV" ] && { echo "$REV" | grep -qe "^[0-9]*$"; } || unset REV
 	case $DISTRIB_RELEASE in
 		SNAPSHOT) [ -n "$REV" ] && [ "$REV" -lt "19805" ] && use_OWE_flag='1' || use_OWE_flag='2' ;;
 		[0-9]|1[0-8].*) use_OWE_flag='0' ;;
@@ -41,36 +42,46 @@ use_OWE_flag=''
 	[ -z "$({ opkg list-installed wpad*; opkg list-installed hostapd*; } | cut -f 1 -d ' ' | grep -E '^hostapd$|^wpad$|ssl$|tls$')" ] && use_OWE_flag='0'
 }
 
+. /lib/functions.sh
+
 # setup network config
 
-uci -q delete network.guest_dev
-uci batch << EOI
+config_load network
+
+[ -z "$(config_foreach echo 'device')" ] && {
+	# config style up to 19.07
+	uci -q delete network.guest
+	uci batch << EOI
+set network.guest=interface
+set network.guest.type='bridge'
+EOI
+} || {
+	# config style from 21.02 onward
+	uci -q delete network.guest_dev
+	uci batch << EOI
 set network.guest_dev=device
 set network.guest_dev.type='bridge'
 set network.guest_dev.name='br-guest'
-set network.guest_dev.bridge_empty='1'
 EOI
-
-uci -q delete network.guest
-uci batch << EOI
+	uci -q delete network.guest
+	uci batch << EOI
 set network.guest=interface
-set network.guest.proto='static'
 set network.guest.device='br-guest'
-set network.guest.force_link='0'
-set network.guest.ip6assign='60'
+EOI
+}
+uci batch << EOI
+set network.guest.proto='static'
+set network.guest.ip6assign='64'
 set network.guest.ipaddr="${GuestWiFi_IP}"
 set network.guest.netmask="${GuestWiFi_netmask}"
-set network.guest.type='bridge'
-add_list network.guest.dns="${GuestWiFi_IP}"
-
 EOI
 
 uci commit network
 
 # setup wireless config
 
-RNG='/dev/urandom'; [ -c /dev/hwrng ] && RNG='/dev/hwrng'
-. /lib/functions.sh; config_load wireless
+RNG='/dev/urandom'
+config_load wireless
 ALLRADIOS=$(config_foreach echo 'wifi-device')
 
 for RADIO in $ALLRADIOS; do
