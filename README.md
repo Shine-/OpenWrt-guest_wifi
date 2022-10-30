@@ -9,8 +9,7 @@ This script is almost fully automated, and using it is quite simple. To use this
 
 1. Download the script `guest_wifi_setup.sh` and save it somewhere on the router, preferrably on non-persistent storage, like `/tmp`.
 2. Fill in the `GuestWifi_{SSID,IP,netmask}` variables at the top of the script. 
-3. (optional) To force OWE support to be enabled/disabled, set `use_OWE_flag` to `1` or `0`. 
-      NOTE: if this variable is blank / undefined / anything other than 0 or 1; the default behavior is to use OWE if any TLS capable version of wpad or hostapd is installed, and not to use OWE if the mesh / mini / basic version without TLS support is installed.
+3. (optional) To force OWE support to be enabled/disabled, set `use_OWE_flag` to `0`, `1`, `2` or `3`. NOTE: if this variable is blank, the default behavior is to use OWE transition mode for OpenWrt versions that support it (19.07+), but only if any TLS capable version of wpad or hostapd is installed, and not to use OWE if the mesh / mini / basic version without TLS support, or an older OpenWrt version, is installed.
 4. `chmod +x` the script and run it. 
 5. Wait for the script to finish running.
 6. Your guest WiFi network(s) are now available.
@@ -39,11 +38,12 @@ NOTE: a few of these steps are only done when setting up a guest network with OW
 
 1. `network` config is setup in UCI. The script creates a bridge device called `br-guest` and guest interface called `guest`
 2. `wireless` config is setup in UCI.  The script sets up the guest wifi network interfaces. As many interfaces are setup as there are physical radios. These will all use the same SSID (defined by the script variable `GuestWiFi_SSID`). Guests are isolated on all interfaces. All interfaces are (for the moment) disabled. The script generates interface names in the format "guest" + a random 4-digit hex number. It does this for the `guest_wifi` command to be able to find its own WiFi networks later.
-3. `(OWE ONLY)` Additional interfaces (one per radio) that are hidden and use OWE encryption are setup. These enable client isolation and are also (for the moment) disabled. They have SSID's that are based on `${GuestWiFi_SSID}`. If a supported OpenWrt version is detected, the script lets OpenWrt handle the OWE transition management. Otherwise, the script calculates random BSSIDs in the LAA ("locally administered") ranges and configures each WiFi interface to point its transitional BSSID at the other (Open resp. OWE) BSSID of the respective radio. NOTE: This script is intentionally not employing the same or similar BSSID calculation that OpenWrt uses by default, to prevent collissions with your other, manually set up WiFi networks.
-4. `dhcp` config is setup in UCI. This allows clients connected to the guest network to obtain DHCP leases.
-5. `firewall` config is setup in UCI. a `guest` firewall zone (which forwards to WAN) is created, and firewall rules permitting DCHP, DHCPv6 and DNS traffic are setup
-6. The `guest_wifi` command is installed to `/sbin/guest_wifi`. This enables one to easily bring up/down the guest network(s).
-7. The guest wifi network is brought up via the (just installed) `guest_wifi` command, which will warn you in case one or more of your radios are disabled globally (you'll have to manually enable them in that case). After which the guest wifi should be active.
+3. `(OWE transition ONLY)` Additional interfaces (one per radio) that are hidden and use OWE encryption are setup. These enable client isolation and are also (for the moment) disabled. They have SSID's that are based on `${GuestWiFi_SSID}`. If a supported OpenWrt version is detected, the script lets OpenWrt handle the OWE transition management. Otherwise, the script calculates random BSSIDs in the LAA ("locally administered") ranges and configures each WiFi interface to point its transitional BSSID at the other (Open resp. OWE) BSSID of the respective radio. NOTE: This script is intentionally not employing the same or similar BSSID calculation that OpenWrt uses by default, to prevent collissions with your other, manually set up WiFi networks.
+4. `(OWE-only mode)` In this special mode, no unencrypted SSIDs are created. The OWE-enabled wifi SSIDs are not hidden and carry the exact SSID as defined at the beginning of the script. No transition SSID/BSSID options are set. Attention: In this mode, only clients that support WPA3/SAE will be able to connect to your guest SSIDs, any legacy WiFi clients will fail to connect! This mode is **never** selected by default, you have to enable it manually with the `use_OWE_flag` set to `3`.
+5. `dhcp` config is setup in UCI. This allows clients connected to the guest network to obtain DHCP leases.
+6. `firewall` config is setup in UCI. a `guest` firewall zone (which forwards to WAN) is created, and firewall rules permitting DCHP, DHCPv6 and DNS traffic are setup
+7. The `guest_wifi` command is installed to `/sbin/guest_wifi`. This enables one to easily bring up/down the guest network(s).
+8. The guest wifi network is brought up via the (just installed) `guest_wifi` command, which will warn you in case one or more of your radios are disabled globally (you'll have to manually enable them in that case). After which the guest wifi should be active.
 
 *----- END OF GUEST WIFI SETUP -----*
 
