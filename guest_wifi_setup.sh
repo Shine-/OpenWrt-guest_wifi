@@ -4,7 +4,7 @@
 # For OpenWrt versions/configurations that support it, it will also enable OWE (Enhanced Open) using a transition network.
 # Based on an original script from https://github.com/jkool702/OpenWrt-guest_wifi/
 # This script features the following fixes and rewrites, compared to the original script:
-#  * remove/fix several typos, invalid settings and unwanted dependencies
+#  * remove/fix several typos, invalid or missing settings and unwanted dependencies
 #  * make compatible with earlier (and later) versions of OpenWrt
 #  * improve detection of OWE capabilities and rewrite WiFi setup to support any number of radios and bands
 #  * turn guest networks on/off with a helper script similar to OpenWrt's "wifi", instead of a system service
@@ -17,7 +17,7 @@ GuestWiFi_IP='192.168.2.1'
 GuestWiFi_netmask='255.255.255.0'
 
 # By setting the below variable, you can forcibly enable/disable OWE and OWE transition mode
-#  empty         = autodetect based on OpenWrt version and wpad/hostapd variant with SAE (WPA3) support
+#  empty         = autodetect based on OpenWrt version and wpad/hostapd variant with SAE (WPA3+OWE) support
 #  '1'           = use OWE and generate randomized transition BSSIDs (requires OpenWrt 19.07 or later)
 #  '2'           = use OWE and let OpenWrt assign transition BSSIDs (requires OpenWrt 22.03.0-rc5 or later)
 #  '3'           = use OWE only, don't create any unencrypted transition SSID (requires OpenWrt 19.07 or later)
@@ -30,10 +30,15 @@ use_OWE_flag=''
 	eval $(cat /etc/openwrt_release | grep -E '^DISTRIB_RE(LEASE|VISION)=')
 	REV=${DISTRIB_REVISION/[+-]*/}; REV=${REV#r}; [ -n "$REV" ] && { echo "$REV" | grep -qe "^[0-9]*$"; } || unset REV
 	case $DISTRIB_RELEASE in
-		SNAPSHOT) [ -n "$REV" ] && [ "$REV" -lt "19805" ] && use_OWE_flag='1' || use_OWE_flag='2' ;;
+		# up to 18.06: no SAE support at all
 		[0-9]|1[0-8].*) use_OWE_flag='0' ;;
-		19.*|21.*) use_OWE_flag='1' ;;
+		# 19.07: need full wpad/hostapd variant with openssl/wolfssl for OWE support
+		19.*) [ -z "$({ opkg list-installed wpad*; opkg list-installed hostapd* | cut -f 1 -d ' ' | grep -E '^wpad$|^hostapd$|basic'); })" ] && use_OWE_flag='1' || use_OWE_flag='0' ;;
+		# starting from 21.02: OWE enabled in all full and all openssl/wolfssl variants of hostapd/wpad (including "basic")
+		21.*) use_OWE_flag='1' ;;
+		# starting from 22.03 r19446 or SNAPSHOT r19805: can auto-generate transition SSIDs/BSSIDs, choose that method if supported
 		22.*) [ -n "$REV" ] && [ "$REV" -lt "19446" ] && use_OWE_flag='1' || use_OWE_flag='2' ;;
+		SNAPSHOT) [ -n "$REV" ] && [ "$REV" -lt "19805" ] && use_OWE_flag='1' || use_OWE_flag='2' ;;
 		*) use_OWE_flag='2' ;;
 	esac
 	[ -z "$({ opkg list-installed wpad*; opkg list-installed hostapd*; } | cut -f 1 -d ' ' | grep -E '^hostapd$|^wpad$|ssl$|tls$')" ] && use_OWE_flag='0'
@@ -86,8 +91,8 @@ for RADIO in $ALLRADIOS; do
 	uci -q delete wireless.guest_${RADIO}
 	uci -q delete wireless.guest_${RADIO}_owe
 
+	# create Open Network (unencrypted) SSID
 	[ "${use_OWE_flag}" = "3" ] || {
-		# create Open Network (unencrypted) SSID
 		IFNAMEA="guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)"
 		uci batch << EOI
 set wireless.guest_${RADIO}=wifi-iface
@@ -120,7 +125,7 @@ set wireless.guest_${RADIO}_owe.disabled='1'
 EOI
 	}
 
-	# enable OWE transition using randomly generated BSSIDs (requires OpenWrt 19.07 or newer)
+	# enable OWE transition using randomly generated BSSIDs (requires OpenWrt 19.07 or later)
 	[ "${use_OWE_flag}" = "1" ] && {
 
 		# generate random BSSID prefix (first 5 bytes) in LAA range
@@ -145,7 +150,7 @@ set wireless.guest_${RADIO}_owe.owe_transition_bssid=${BSSID}${BSSIDA}
 EOI
 	}
 
-	# enable OWE transition management (SSID/BSSID) by OpenWrt (requires OpenWrt 22.03.0-rc5 or newer)
+	# enable OWE transition management (SSID/BSSID) by OpenWrt (requires OpenWrt 22.03.0-rc5 or later)
 	[ "${use_OWE_flag}" = "2" ] && {
 
 		uci batch << EOI
@@ -226,6 +231,18 @@ set firewall.guest_dns.src='guest'
 set firewall.guest_dns.dest_port='53'
 set firewall.guest_dns.proto='tcp udp'
 set firewall.guest_dns.target='ACCEPT'
+EOI
+
+uci -q delete firewall.guest_ndp
+uci batch << EOI
+set firewall.guest_ndp=rule
+set firewall.guest_ndp.name='Allow-NDP-guest'
+set firewall.guest_ndp.src='guest'
+set firewall.guest_ndp.family='ipv6'
+set firewall.guest_ndp.proto='icmp'
+set firewall.guest_ndp.target='ACCEPT'
+add_list firewall.guest_ndp.icmp_type='neighbour-advertisement'
+add_list firewall.guest_ndp.icmp_type='router-advertisement'
 EOI
 
 uci commit firewall
