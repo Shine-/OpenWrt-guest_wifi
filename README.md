@@ -8,11 +8,12 @@ The script supports both "standard" guest networks and guest networks that use O
 This script is almost fully automated, and using it is quite simple. To use this script, do the following:
 
 1. Download the script `guest_wifi_setup.sh` and save it somewhere on the router, preferrably on non-persistent storage, like `/tmp`.
-2. Fill in the `GuestWifi_{SSID,IP,netmask}` variables at the top of the script. 
-3. (optional) To force OWE support to be enabled/disabled, set `use_OWE_flag` to `0`, `1`, `2` or `3`. NOTE: if this variable is blank, the default behavior is to use OWE transition mode for OpenWrt versions that support it (19.07+), but only if any TLS capable version of wpad or hostapd is installed, and not to use OWE if the mesh / mini / basic version without TLS support, or an older OpenWrt version, is installed.
-4. `chmod +x` the script and run it. 
-5. Wait for the script to finish running.
-6. Your guest WiFi network(s) are now available.
+2. Fill in the `GuestWifi_SSID` variable at the top of the script with your desired SSID.
+3. (optional) If you don't want the script to automatically generate an IP subnet to use, also fill out the variables `Guest_Wifi_IP` and `Guest_Wifi_netmask`.
+4. (optional) To force OWE support to be enabled/disabled, set `use_OWE_flag` to `0`, `1`, `2` or `3`. NOTE: if this variable is blank, the default behavior is to use OWE transition mode for OpenWrt versions that support it (19.07+), but only if any TLS capable version of wpad or hostapd is installed, and not to use OWE if the mesh / mini / basic version without TLS support, or an older OpenWrt version, is installed.
+5. `chmod +x` the script and run it.
+6. Wait for the script to finish running.
+7. Your guest WiFi network(s) are now available.
      NOTE: in case your WiFi radio(s) were disabled before execution of this script, they're still disabled now. You have to manually enable them for the guest network(s) to start working. The script will warn you at the end of execution if this is the case.
 
 Your guest wifi network is now setup on your router and should be active and broadcasting!!! 
