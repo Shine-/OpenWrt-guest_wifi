@@ -96,8 +96,7 @@ GuestWiFi_netmask=$((INTNM>>24&0xff)).$((INTNM>>16&0xff)).$((INTNM>>8&0xff)).$((
 
 # calculate largest possible consecutive DHCP range in selected subnet
 
-[ $((INTIP-(INTSN+1))) -gt $((INTBC-1-INTIP)) ] && { DHCPSTART=$((INTSN+1)); DHCPEND=$((INTIP-1)); } || { DHCPSTART=$((INTIP+1)); DHCPEND=$((INTBC-1)); }
-DHCPCOUNT=$((DHCPEND-DHCPSTART+1)); DHCPSTART=$((DHCPSTART>>24&0xff)).$((DHCPSTART>>16&0xff)).$((DHCPSTART>>8&0xff)).$((DHCPSTART&0xff))
+[ $((INTIP-INTSN)) -gt $((INTBC-INTIP)) ] && { DHCPOFFSET='1'; DHCPCOUNT=$((INTIP-INTSN-1)); } || { DHCPOFFSET=$((INTIP-INTSN+1)); DHCPCOUNT=$((INTBC-INTIP-1)); }
 
 # setup network config
 
@@ -141,7 +140,7 @@ uci -q delete dhcp.guest
 uci batch << EOI
 set dhcp.guest=dhcp
 set dhcp.guest.interface='guest'
-set dhcp.guest.start="${DHCPSTART}"
+set dhcp.guest.start="${DHCPOFFSET}"
 set dhcp.guest.limit="${DHCPCOUNT}"
 set dhcp.guest.leasetime='12h'
 set dhcp.guest.dhcpv6='server'
