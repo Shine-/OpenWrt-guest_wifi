@@ -1,51 +1,35 @@
 # OpenWrt-guest_wifi
-Automatic setup script for a guest wireless network for routers running OpenWrt firmware. 
+Automatic setup script for unencrypted and/or OWE-encrypted Open Guest WiFi networks on routers running OpenWrt firmware.
 This script should work with any OpenWrt-supported WiFi device and any recent OpenWrt version.
 
-The script supports both "standard" guest networks and guest networks that use Open Wireless Encryption (OWE) with a transition SSID. The OWE guest network is setup such that all clients can connect regardless of whether or not they support OWE. Clients that support OWE will utilize it, and clients that don't will automatically fall back to using legacy mode (open network, no encryption).
+The script supports setting up legacy unencrypted SSIDs as well as OWE (encrypted) "Enhanced Open" networks. By default - if supported by your OpenWrt version/configuration, that is - both kinds of networks are set up and OWE transition will be enabled. This means that WPA3/SAE-capable clients will automatically "upgrade" their connection to the "Enhanced Open" network with encryption. Clients that don't support WPA3/SAE will automatically fall back to the legacy unencrypted Open Network.
+
+The Guest WiFi network is completely separated from your LAN.
 
 # Usage
-This script is almost fully automated, and using it is quite simple. To use this script, do the following:
+This script will do its job fully automated while trying to prevent collissions with your existing configuration as good as possible.
 
-1. Download the script `guest_wifi_setup.sh` and save it somewhere on the router, preferrably on non-persistent storage, like `/tmp`.
-2. Fill in the `GuestWifi_SSID` variable at the top of the script with your desired SSID.
-3. (optional) If you don't want the script to automatically generate an IP subnet to use, also fill out the variables `Guest_Wifi_IP` and `Guest_Wifi_netmask`.
-4. (optional) To force OWE support to be enabled/disabled, set `use_OWE_flag` to `0`, `1`, `2` or `3`. NOTE: if this variable is blank, the default behavior is to use OWE transition mode for OpenWrt versions that support it (19.07+), but only if any TLS capable version of wpad or hostapd is installed, and not to use OWE if the mesh / mini / basic version without TLS support, or an older OpenWrt version, is installed.
-5. `chmod +x` the script and run it.
-6. Wait for the script to finish running.
-7. Your guest WiFi network(s) are now available.
-     NOTE: in case your WiFi radio(s) were disabled before execution of this script, they're still disabled now. You have to manually enable them for the guest network(s) to start working. The script will warn you at the end of execution if this is the case.
+If desired, you can control the scipt's behavior to some extent by pre-setting certain variables. Please see the top of the script for more detailed instructions.
 
-Your guest wifi network is now setup on your router and should be active and broadcasting!!! 
+Upload the script `guest_wifi_setup.sh` to your OpenWrt device, preferrably to non-persistent storage such as `/tmp`, since you will only need to run it once. Then, `chmod +x` it and run it.
 
-The script will install a new script called `guest_wifi` which you can use to control the new guest wifi network(s). The guest wifi SSIDs can be started / stopped / restarted by running:
+After the script finishes running, your Guest WiFi SSID(s) are immediately available, unless the radio(s) were disabled globally. The script will warn you in such a case.
+
+In addition, the script will install a new command `guest_wifi` that can be used to control your Guest WiFi SSIDs (turn on, off or restart).
 
 ```
-guest_wifi enable    # enable and start guest WiFi SSIDs
-guest_wifi disable   # disable and stop guest WiFi SSIDs
-guest_wifi restart   # restart all WiFi radios that carry guest WiFi SSIDs
+guest_wifi enable    # enable and start Guest WiFi SSIDs
+guest_wifi disable   # disable and stop Guest WiFi SSIDs
+guest_wifi restart   # restart all WiFi radios that carry Guest WiFi SSIDs
+guest_wifi           # without parameter is the same as 'restart'
 ```
-
-The command `guest_wifi` without any parameter is the same as `restart`.
 
 Radios that don't carry a guest WiFi SSID as set up by this script will not be affected by the `guest_wifi` command, nor will the `guest_wifi` command enable radios that have been disabled globally, even if they do carry a guest WiFi SSID. The `guest_wifi` command will, similar to OpenWrt's `wifi` command, not require a router restart in any case.
 
-The `guest_wifi` command won't correct any misconfiguration that you may have performed on the guest WiFi interfaces. If it doesn't find any of its guest SSIDs, it will exit with an error message.
+The `guest_wifi` command won't correct any misconfiguration that you may have performed on the Guest WiFi SSIDs and network interfaces. If it doesn't find any of its guest SSIDs, it will exit with an error message.
 
-# How the script sets everything up
-In setting up the guest wifi network, the following actions are performed:
+# Technical details
+See comments inside the script.
 
-NOTE: a few of these steps are only done when setting up a guest network with OWE support. These are labeled with the tag `(OWE ONLY)`
-
-1. `network` config is setup in UCI. The script creates a bridge device called `br-guest` and guest interface called `guest`
-2. `wireless` config is setup in UCI.  The script sets up the guest wifi network interfaces. As many interfaces are setup as there are physical radios. These will all use the same SSID (defined by the script variable `GuestWiFi_SSID`). Guests are isolated on all interfaces. All interfaces are (for the moment) disabled. The script generates interface names in the format "guest" + a random 4-digit hex number. It does this for the `guest_wifi` command to be able to find its own WiFi networks later.
-3. `(OWE transition ONLY)` Additional interfaces (one per radio) that are hidden and use OWE encryption are setup. These enable client isolation and are also (for the moment) disabled. They have SSID's that are based on `${GuestWiFi_SSID}`. If a supported OpenWrt version is detected, the script lets OpenWrt handle the OWE transition management. Otherwise, the script calculates random BSSIDs in the LAA ("locally administered") ranges and configures each WiFi interface to point its transitional BSSID at the other (Open resp. OWE) BSSID of the respective radio. NOTE: This script is intentionally not employing the same or similar BSSID calculation that OpenWrt uses by default, to prevent collissions with your other, manually set up WiFi networks.
-4. `(OWE-only mode)` In this special mode, no unencrypted SSIDs are created. The OWE-enabled wifi SSIDs are not hidden and carry the exact SSID as defined at the beginning of the script. No transition SSID/BSSID options are set. Attention: In this mode, only clients that support WPA3/SAE will be able to connect to your guest SSIDs, any legacy WiFi clients will fail to connect! This mode is **never** selected by default, you have to enable it manually with the `use_OWE_flag` set to `3`.
-5. `dhcp` config is setup in UCI. This allows clients connected to the guest network to obtain DHCP leases.
-6. `firewall` config is setup in UCI. a `guest` firewall zone (which forwards to WAN) is created, and firewall rules permitting DCHP, DHCPv6 and DNS traffic are setup
-7. The `guest_wifi` command is installed to `/sbin/guest_wifi`. This enables one to easily bring up/down the guest network(s).
-8. The guest wifi network is brought up via the (just installed) `guest_wifi` command, which will warn you in case one or more of your radios are disabled globally (you'll have to manually enable them in that case). After which the guest wifi should be active.
-
-*----- END OF GUEST WIFI SETUP -----*
-
-Original script is by GH user "jkool702" using MIT license (see LICENSE file). All of **my** changes are public domain. You may reuse my work for any purpuse, with or without crediting me. Since the original license is MIT, you will still have to credit the original author, though, in most cases.
+# Disclaimer
+This script is based on an original script by GH user "jkool702" using MIT license (see LICENSE file). All of **my** changes are public domain. You may reuse my work for any purpuse, with or without crediting me. Since the original license is MIT, you will still have to credit the original author and include the original license, though, in most cases.

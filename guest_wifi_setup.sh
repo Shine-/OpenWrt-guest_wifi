@@ -16,6 +16,17 @@
 #  OpenWrt 21.02 or later will work out-of-the-box
 #  for OpenWrt 19.07, install prerequisites as follows: opkg update && opkg remove wpad* && opkg install wpad-wolfssl
 
+# Turning on or off the guest WiFi networks:
+# After this script finishes, you can enable or disable the Guest WiFi SSIDs using the following command:
+#  'guest_wifi enable'   turns on the Guest WiFi SSIDs
+#  'guest_wifi disable'  turns off the Guest WiFi SSIDs
+#  'guest_wifi restart'  restarts all radios that carry Guest WiFi SSIDs
+#  'guest_wifi'          without parameters is the same as 'restart'
+# Note: If your radios are turned off globally, the 'guest_wifi' command will not turn them on.
+# It will warn you regarding which radio(s) are disabled, though.
+
+
+# === User configurable settings below ===
 
 # By setting the below variable, you can define a custom guest network SSID to use.
 # If this is unset, the default setting of 'Guest_WiFi' will be used.
@@ -38,6 +49,8 @@ use_OWE_flag=''
 # If this is unset (default) or invalid, the script will choose a random /24 subnet in the 10.0.0.0/8 range.
 GuestWiFi_IP=''
 GuestWiFi_netmask=''
+
+# === End of user configurable settings ===
 
 
 # determine whether to use user-defined SSID or default one
