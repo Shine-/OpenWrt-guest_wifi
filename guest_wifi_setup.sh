@@ -9,16 +9,20 @@
 #  * improve detection of OWE capabilities and rewrite WiFi setup to support any number of radios and bands
 #  * turn guest networks on/off with a helper script similar to OpenWrt's "wifi", instead of a system service
 #  * get rid of all the reboots that the original script performs, as none of them is necessary
+#  * replace some hardcoded settings with automatic/randomized ones to prevent possible collisions
 # Please find the latest version of this script at https://github.com/Shine-/OpenWrt-guest_wifi/
 
 # Prerequisites for OWE:
 #  OpenWrt 21.02 or later will work out-of-the-box
 #  for OpenWrt 19.07, install prerequisites as follows: opkg update && opkg remove wpad* && opkg install wpad-wolfssl
 
-# set guest network SSID
-GuestWiFi_SSID='Guest_WiFi'
 
-# By setting the below variable, you can forcibly enable/disable OWE and OWE transition mode
+# By setting the below variable, you can define a custom guest network SSID to use.
+# If this is unset, the default setting of 'Guest_WiFi' will be used.
+# Note: In case OWE transition is used, the OWE SSID will have an additional "_OWE" appended.
+GuestWiFi_SSID=''
+
+# By setting the below variable, you can forcibly enable/disable OWE and OWE transition mode.
 #  empty         = autodetect based on OpenWrt version and wpad/hostapd variant with SAE (WPA3+OWE) support
 #  '1'           = use OWE and generate randomized transition BSSIDs (requires OpenWrt 19.07 or later)
 #  '2'           = use OWE and let OpenWrt assign transition BSSIDs (requires OpenWrt 22.03.0-rc5 or later)
@@ -31,12 +35,17 @@ use_OWE_flag=''
 # Example:
 #  GuestWiFi_IP='192.0.2.1'
 #  GuestWiFi_netmask='255.255.255.0'
-# If this is unset (default) or invalid, the script will choose a random /24 subnet in the 10.0.0.0/8 range
+# If this is unset (default) or invalid, the script will choose a random /24 subnet in the 10.0.0.0/8 range.
 GuestWiFi_IP=''
 GuestWiFi_netmask=''
 
 
+# determine whether to use user-defined SSID or default one
+
+[ -z "$GuestWiFi_SSID" ] && GuestWiFi_SSID='Guest_WiFi'
+
 # determine whether to use OWE transition mode, based on version, wpad/hostapd variant, or forced setting
+
 [ -z "$use_OWE_flag" ] && {
 	eval $(cat /etc/openwrt_release | grep -E '^DISTRIB_RE(LEASE|VISION)=')
 	REV=${DISTRIB_REVISION/[+-]*/}; REV=${REV#r}; [ -n "$REV" ] && { echo "$REV" | grep -qe "^[0-9]*$"; } || unset REV
@@ -55,11 +64,31 @@ GuestWiFi_netmask=''
 	[ -z "$({ opkg list-installed wpad*; opkg list-installed hostapd*; } | cut -f 1 -d ' ' | grep -E '^hostapd$|^wpad$|ssl$|tls$')" ] && use_OWE_flag='0'
 }
 
+# determine whether to use predefined IP address and subnet (minimum allowed size is /29) or generate random 10.x.x.1/24
+
 RNG='/dev/urandom'
-. /lib/functions.sh
+echo "${GuestWiFi_IP}" | grep -qE '^(([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))\.){3}([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))$' || GuestWiFi_IP=''
+echo "${GuestWiFi_netmask}" | grep -qE '^(254|252|248|240|224|192|128)\.0\.0\.0|255\.(254|252|248|240|224|192|128|0)\.0\.0|255\.255\.(254|252|248|240|224|192|128|0)\.0|255\.255\.255\.(248|240|224|192|128|0)$' || GuestWiFi_netmask=''
+[ -z "${GuestWiFi_IP}" -o -z "${GuestWiFi_netmask}" ] && {
+	INTIP=$((0x0a`head -c2 $RNG | hexdump -ve '/1 \"%02x\"'`01))
+	INTNM=$((0xffffff00))
+} || {
+	INTIP=$((0)); for BYTE in `echo "${GuestWiFi_IP}" | tr '.' ' '`; do INTIP=$(( ${INTIP}<<8|${BYTE} )); done
+	INTNM=$((0)); for BYTE in `echo "${GuestWiFi_netmask}" | tr '.' ' '`; do INTNM=$(( ${INTNM}<<8|${BYTE} )); done
+}
+INTSN=$((INTIP&INTNM)); INTBC=$((~INTNM&0xffffffff|INTIP))
+[ "$INTIP" -eq "$INTSN" ] && INTIP=$((INTSN+1)) || { [ "$INTIP" -eq "$INTBC" ] && INTIP=$((INTBC-1)); } # sanitize IP
+GuestWiFi_IP=$((INTIP>>24&0xff)).$((INTIP>>16&0xff)).$((INTIP>>8&0xff)).$((INTIP&0xff))
+GuestWiFi_netmask=$((INTNM>>24&0xff)).$((INTNM>>16&0xff)).$((INTNM>>8&0xff)).$((INTNM&0xff))
+
+# calculate largest possible consecutive DHCP range in selected subnet
+
+[ $((INTIP-(INTSN+1))) -gt $((INTBC-1-INTIP)) ] && { DHCPSTART=$((INTSN+1)); DHCPEND=$((INTIP-1)); } || { DHCPSTART=$((INTIP+1)); DHCPEND=$((INTBC-1)); }
+DHCPCOUNT=$((DHCPEND-DHCPSTART+1)); DHCPSTART=$((DHCPSTART>>24&0xff)).$((DHCPSTART>>16&0xff)).$((DHCPSTART>>8&0xff)).$((DHCPSTART&0xff))
 
 # setup network config
 
+. /lib/functions.sh
 config_load network
 
 [ -z "$(config_foreach echo 'device')" ] && {
@@ -84,14 +113,6 @@ set network.guest.device='br-guest'
 EOI
 }
 
-# use predefined IP address and subnet (minimum allowed size is /29) or generate random 10.x.x.1/24 IP and subnet
-echo "${GuestWiFi_IP}" | grep -qE '^(([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))\.){3}([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))$' || GuestWiFi_IP=''
-echo "${GuestWiFi_netmask}" | grep -qE '^(254|252|248|240|224|192|128)\.0\.0\.0|255\.(254|252|248|240|224|192|128|0)\.0\.0|255\.255\.(254|252|248|240|224|192|128|0)\.0|255\.255\.255\.(248|240|224|192|128|0)$' || GuestWiFi_netmask=''
-[ -z "${GuestWiFi_IP}" -o -z "${GuestWiFi_netmask}" ] && {
-   GuestWiFi_IP="0x0a`head -c2 $RNG | hexdump -ve '/1 \"%02x\"'`01"
-   GuestWiFi_IP=$((GuestWiFi_IP>>24&0xff)).$((GuestWiFi_IP>>16&0xff)).$((GuestWiFi_IP>>8&0xff)).$((GuestWiFi_IP&0xff))
-   GuestWiFi_netmask='255.255.255.0'
-}
 uci batch << EOI
 set network.guest.proto='static'
 set network.guest.ip6assign='64'
@@ -100,6 +121,22 @@ set network.guest.netmask="${GuestWiFi_netmask}"
 EOI
 
 uci commit network
+
+# setup dhcp config
+
+uci -q delete dhcp.guest
+uci batch << EOI
+set dhcp.guest=dhcp
+set dhcp.guest.interface='guest'
+set dhcp.guest.start="${DHCPSTART}"
+set dhcp.guest.limit="${DHCPCOUNT}"
+set dhcp.guest.leasetime='12h'
+set dhcp.guest.dhcpv6='server'
+set dhcp.guest.ra='server'
+set dhcp.guest.force='1'
+EOI
+
+uci commit dhcp
 
 # setup wireless config
 
@@ -184,30 +221,6 @@ EOI
 done
 
 uci commit wireless
-
-# calculate largest possible consecutive DHCP range in selected subnet
-
-INTIP=$((0)); for BYTE in `echo "${GuestWiFi_IP}" | tr '.' ' '`; do INTIP=$(( ${INTIP}<<8|${BYTE} )); done
-INTNM=$((0)); for BYTE in `echo "${GuestWiFi_netmask}" | tr '.' ' '`; do INTNM=$(( ${INTNM}<<8|${BYTE} )); done
-INTSN=$((INTIP&INTNM)); INTBC=$((~INTNM&0xffffffff|INTIP))
-[ $((INTIP-(INTSN+1))) -gt $((INTBC-1-INTIP)) ] && { DHCPSTART=$((INTSN+1)); DHCPEND=$((INTIP-1)); } || { DHCPSTART=$((INTIP+1)); DHCPEND=$((INTBC-1)); }
-DHCPCOUNT=$((DHCPEND-DHCPSTART+1)); DHCPSTART=$((DHCPSTART>>24&0xff)).$((DHCPSTART>>16&0xff)).$((DHCPSTART>>8&0xff)).$((DHCPSTART&0xff))
-
-# setup dhcp config
-
-uci -q delete dhcp.guest
-uci batch << EOI
-set dhcp.guest=dhcp
-set dhcp.guest.interface='guest'
-set dhcp.guest.start="${DHCPSTART}"
-set dhcp.guest.limit="${DHCPCOUNT}"
-set dhcp.guest.leasetime='12h'
-set dhcp.guest.dhcpv6='server'
-set dhcp.guest.ra='server'
-set dhcp.guest.force='1'
-EOI
-
-uci commit dhcp
 
 # setup firewall config
 
