@@ -14,7 +14,7 @@
 
 # Prerequisites for OWE:
 #  OpenWrt 21.02 or later will work out-of-the-box
-#  for OpenWrt 19.07, install prerequisites as follows: opkg update && opkg remove wpad* && opkg install wpad-wolfssl
+#  for OpenWrt 19.07, install prerequisites as follows: opkg update && opkg remove wpad* && opkg install wpad-openssl
 
 # Turning on or off the guest WiFi networks:
 # After this script finishes, you can enable or disable the Guest WiFi SSIDs using the following command:
@@ -46,6 +46,11 @@ use_OWE_flag=''
 # Example:
 #  GuestWiFi_IP='192.0.2.1'
 #  GuestWiFi_netmask='255.255.255.0'
+# or:
+#  GuestWiFi_IP='192.0.2.1'
+#  GuestWiFi_netmask='/24'
+# or:
+#  GuestWiFi_IP='192.0.2.1/24'
 # If this is unset (default) or invalid, the script will choose a random /24 subnet in the 10.0.0.0/8 range.
 GuestWiFi_IP=''
 GuestWiFi_netmask=''
@@ -60,12 +65,12 @@ GuestWiFi_netmask=''
 # determine whether to use OWE transition mode, based on version, wpad/hostapd variant, or forced setting
 
 [ -z "$use_OWE_flag" ] && {
-	eval $(cat /etc/openwrt_release | grep -E '^DISTRIB_RE(LEASE|VISION)=')
+	eval $(grep -E '^DISTRIB_RE(LEASE|VISION)=' /etc/openwrt_release)
 	REV=${DISTRIB_REVISION/[+-]*/}; REV=${REV#r}; [ -n "$REV" ] && { echo "$REV" | grep -qe "^[0-9]*$"; } || unset REV
 	case $DISTRIB_RELEASE in
 		# up to 18.06: no SAE support at all
 		[0-9]|1[0-8].*) use_OWE_flag='0' ;;
-		# 19.07: need full wpad/hostapd variant with openssl/wolfssl for OWE support
+		# 19.07: need full wpad/hostapd variant with openssl/wolfssl for OWE support (openssl appears to work better, though)
 		19.*) [ -z "$({ opkg list-installed wpad*; opkg list-installed hostapd*; } | cut -f 1 -d ' ' | grep -E '^wpad$|^hostapd$|basic')" ] && use_OWE_flag='1' || use_OWE_flag='0' ;;
 		# starting from 21.02: OWE enabled in all full and all openssl/wolfssl variants of hostapd/wpad (including "basic")
 		21.*) use_OWE_flag='1' ;;
@@ -80,17 +85,18 @@ GuestWiFi_netmask=''
 # determine whether to use predefined IP address and subnet (minimum allowed size is /29) or generate random 10.x.x.1/24
 
 RNG='/dev/urandom'
-echo "${GuestWiFi_IP}" | grep -qE '^(([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))\.){3}([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))$' || GuestWiFi_IP=''
-echo "${GuestWiFi_netmask}" | grep -qE '^(254|252|248|240|224|192|128)\.0\.0\.0|255\.(254|252|248|240|224|192|128|0)\.0\.0|255\.255\.(254|252|248|240|224|192|128|0)\.0|255\.255\.255\.(248|240|224|192|128|0)$' || GuestWiFi_netmask=''
-[ -z "${GuestWiFi_IP}" -o -z "${GuestWiFi_netmask}" ] && {
-	INTIP=$((0x0a`head -c2 $RNG | hexdump -ve '/1 \"%02x\"'`01))
-	INTNM=$((0xffffff00))
+echo "${GuestWiFi_IP}" | grep -qE '^(([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))\.){3}([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))(\/[1-9]|\/[1-2][0-9])?$' || GuestWiFi_IP=''
+echo "${GuestWiFi_netmask}" | grep -qE '^(254|252|248|240|224|192|128)\.0\.0\.0$|^255\.(254|252|248|240|224|192|128|0)\.0\.0$|^255\.255\.(254|252|248|240|224|192|128|0)\.0$|^255\.255\.255\.(248|240|224|192|128|0)$|^\/([1-9]|[1-2][0-9])$' || GuestWiFi_netmask=''
+[ -n "${GuestWiFi_netmask}" -a -z "${GuestWiFi_netmask##\/*}" ] && CIDR="${GuestWiFi_netmask##\/}" || CIDR=''
+[ -n "${GuestWiFi_IP}" -a -z "${GuestWiFi_IP##*\/*}" ] && { CIDR="${GuestWiFi_IP##*\/}"; GuestWiFi_IP="${GuestWiFi_IP%%\/*}"; }
+[ -z "${GuestWiFi_netmask}" -a -z "$CIDR" -o -z "${GuestWiFi_IP}" ] && {
+	INTIP=$((0x0a`head -c2 $RNG | hexdump -ve '/1 "%02x"'`01)); INTNM=$((0xffffff00)) # use random 10.x.x.1/24 subnet if user selection is empty or invalid
 } || {
-	INTIP=$((0)); for BYTE in `echo "${GuestWiFi_IP}" | tr '.' ' '`; do INTIP=$(( ${INTIP}<<8|${BYTE} )); done
-	INTNM=$((0)); for BYTE in `echo "${GuestWiFi_netmask}" | tr '.' ' '`; do INTNM=$(( ${INTNM}<<8|${BYTE} )); done
+	INTIP=$((0)); for BYTE in `echo "${GuestWiFi_IP}" | tr '.' ' '`; do INTIP=$((INTIP<<8|BYTE)); done
+	INTNM=$((0)); [ -n "${CIDR}" ] && INTNM=$((0xffffffff<<(32-CIDR)&0xffffffff)) || { for BYTE in `echo "${GuestWiFi_netmask}" | tr '.' ' '`; do INTNM=$((INTNM<<8|BYTE)); done; }
 }
 INTSN=$((INTIP&INTNM)); INTBC=$((~INTNM&0xffffffff|INTIP))
-[ "$INTIP" -eq "$INTSN" ] && INTIP=$((INTSN+1)) || { [ "$INTIP" -eq "$INTBC" ] && INTIP=$((INTBC-1)); } # sanitize IP
+[ "$INTIP" -eq "$INTSN" ] && INTIP=$((INTSN+1)) || { [ "$INTIP" -eq "$INTBC" ] && INTIP=$((INTBC-1)); } # sanitize IP in case of collission with subnet or broadcast address
 GuestWiFi_IP=$((INTIP>>24&0xff)).$((INTIP>>16&0xff)).$((INTIP>>8&0xff)).$((INTIP&0xff))
 GuestWiFi_netmask=$((INTNM>>24&0xff)).$((INTNM>>16&0xff)).$((INTNM>>8&0xff)).$((INTNM&0xff))
 
@@ -162,7 +168,7 @@ for RADIO in $ALLRADIOS; do
 
 	# create Open Network (unencrypted) SSID
 	[ "${use_OWE_flag}" = "3" ] || {
-		IFNAMEA="guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)"
+		IFNAMEA="guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-f A-F)"
 		uci batch << EOI
 set wireless.guest_${RADIO}=wifi-iface
 set wireless.guest_${RADIO}.ifname="${IFNAMEA}"
@@ -179,7 +185,7 @@ EOI
 	# create Enhanced Open (OWE) SSID
 	[ "${use_OWE_flag}" = "1" -o "${use_OWE_flag}" = "2" -o "${use_OWE_flag}" = "3" ] && {
 
-		IFNAMEB="guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-z A-Z)"
+		IFNAMEB="guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-f A-F)"
 		uci batch << EOI
 set wireless.guest_${RADIO}_owe=wifi-iface
 set wireless.guest_${RADIO}_owe.ifname="${IFNAMEB}"
