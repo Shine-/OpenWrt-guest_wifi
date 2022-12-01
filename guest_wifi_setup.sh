@@ -163,6 +163,9 @@ ALLRADIOS=$(config_foreach echo 'wifi-device')
 
 for RADIO in $ALLRADIOS; do
 
+	# disable default "OpenWrt" SSID if present
+	[ "$(uci -q get wireless.default_$RADIO.ssid)" = "OpenWrt" ] && [ "$(uci -q get wireless.default_$RADIO.encryption)" = "none" ] && uci set wireless.default_$RADIO.disabled='1'
+
 	uci -q delete wireless.guest_${RADIO}
 	uci -q delete wireless.guest_${RADIO}_owe
 
