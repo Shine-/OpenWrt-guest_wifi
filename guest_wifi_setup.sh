@@ -120,7 +120,9 @@ GuestWiFi_netmask=$((INTNM>>24&0xff)).$((INTNM>>16&0xff)).$((INTNM>>8&0xff)).$((
 . /lib/functions.sh
 config_load network
 
-[ -z "$(config_foreach echo 'device')" ] && {
+unset II; for I in `config_foreach echo interface`; do II="${II}$(uci -q get network.$I.device)"; done
+
+[ -z "$II" ] && {
 	# config style up to 19.07
 	uci -q delete network.guest
 	uci batch << EOI
