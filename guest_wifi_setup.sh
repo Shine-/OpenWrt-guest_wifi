@@ -176,10 +176,6 @@ ALLRADIOS=$(config_foreach echo 'wifi-device')
 
 for RADIO in $ALLRADIOS; do
 
-	# set country code if necessary
-	[ -n "$Country_Code" ] && uci set wireless.${RADIO}.country="$Country_Code"
-	[ -n "$CC" -a -z "$(uci -q get wireless.$RADIO.country)" ] && uci set wireless.${RADIO}.country="$CC"
-
 	# disable default "OpenWrt" SSID if present
 	[ "$(uci -q get wireless.default_$RADIO.ssid)" = "OpenWrt" ] && [ "$(uci -q get wireless.default_$RADIO.encryption)" = "none" ] && uci set wireless.default_$RADIO.disabled='1'
 
@@ -255,6 +251,23 @@ set wireless.guest_${RADIO}.owe_transition_ifname="${IFNAMEB}"
 set wireless.guest_${RADIO}_owe.owe_transition_ifname="${IFNAMEA}"
 EOI
 	}
+
+done
+
+uci commit wireless
+
+# additional housekeeping for wireless
+
+config_load wireless
+
+for RADIO in $ALLRADIOS; do
+
+	# set country code if necessary
+	[ -n "$Country_Code" ] && uci set wireless.${RADIO}.country="$Country_Code"
+	[ -n "$CC" -a -z "$(uci -q get wireless.$RADIO.country)" ] && uci set wireless.${RADIO}.country="$CC"
+
+	# in case we don't have any enabled WiFi SSIDs, we can safely enable the physical radio, so our Guest SSID will come online automatically later
+	[ "$(for I in `config_foreach echo wifi-iface`; do [ "$(uci -q get wireless.$I.device)" = "$RADIO" ] && echo "0$(uci -q get wireless.$I.disabled)"; done | uniq)" = "01" ] && uci -q delete wireless.${RADIO}.disabled
 
 done
 

@@ -13,7 +13,7 @@ If desired, you can control the scipt's behavior to some extent by pre-setting c
 
 Upload the script `guest_wifi_setup.sh` to your OpenWrt device, preferrably to non-persistent storage such as `/tmp`, since you will only need to run it once. Then, `chmod +x` it and run it.
 
-After the script finishes running, your Guest WiFi SSID(s) are immediately available, unless the radio(s) were disabled globally. The script will warn you in such a case.
+After the script finishes running, your Guest WiFi SSID(s) are immediately available. If your radio(s) were disabled globally, they will only get (re-)enabled in case the script doesn't find any other SSID that might also get enabled unwantedly. The script will inform you which radio is still disabled, in such a case. The factory-default OpenWrt SSID that would expose your LAN as an Open WiFi will be automatically disabled, in case it's still present.
 
 In addition, the script will install a new command `guest_wifi` that can be used to control your Guest WiFi SSIDs (turn on, off or restart).
 
