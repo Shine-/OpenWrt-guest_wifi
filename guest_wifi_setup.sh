@@ -28,6 +28,12 @@
 
 # === User configurable settings below ===
 
+# By setting the below variable, you can preset which country code to use for WiFi.
+# If this is unset, any existing setting will be kept. If there is no existing setting, the script
+# will try to determine it using geolocation (via http://ipinfo.io - internet connection required!)
+# Note: There's no validity checking, so be sure to use a valid two-letter ISO3166 country code!
+Country_Code=''
+
 # By setting the below variable, you can define a custom guest network SSID to use.
 # If this is unset, the default setting of 'Guest_WiFi' will be used.
 # Note: In case OWE transition is used, the OWE SSID will have an additional "_OWE" appended.
@@ -57,6 +63,11 @@ GuestWiFi_netmask=''
 
 # === End of user configurable settings ===
 
+
+# in case our location isn't preset, try to geolocate us in order to be able to set the proper country code later
+
+unset CC
+[ -z "$Country_Code" ] && ping -q -c 1 -W 2 ipinfo.io >/dev/null 2>&1 && CC="$({ wget -O - http://ipinfo.io/json | jsonfilter -e @.country; } 2>/dev/null)"
 
 # determine whether to use user-defined SSID or default one
 
@@ -162,6 +173,10 @@ config_load wireless
 ALLRADIOS=$(config_foreach echo 'wifi-device')
 
 for RADIO in $ALLRADIOS; do
+
+	# set country code if necessary
+	[ -n "$Country_Code" ] && uci set wireless.${RADIO}.country="$Country_Code"
+	[ -n "$CC" -a -z "$(uci -q get wireless.$RADIO.country)" ] && uci set wireless.${RADIO}.country="$CC"
 
 	# disable default "OpenWrt" SSID if present
 	[ "$(uci -q get wireless.default_$RADIO.ssid)" = "OpenWrt" ] && [ "$(uci -q get wireless.default_$RADIO.encryption)" = "none" ] && uci set wireless.default_$RADIO.disabled='1'
