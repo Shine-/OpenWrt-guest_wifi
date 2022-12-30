@@ -219,25 +219,24 @@ EOI
 	# enable OWE transition using randomly generated BSSIDs (requires OpenWrt 19.07 or later)
 	[ "${use_OWE_flag}" = "1" ] && {
 
-		# generate random BSSID prefix (first 5 bytes) in LAA range
-		unset BSSID
-		while [ -z "$(echo \"$BSSID\" | grep -E '[0-9a-fA-F][26aeAE]')" ]; do BSSID=$(head -c1 $RNG | hexdump -ve '/1 "%02x"'); done
-		BSSID=${BSSID}:$(head -c4 $RNG | hexdump -ve '/1 "%02x:"')
-		# generate random byte to complete BSSID for Open network
-		BSSIDA=$(head -c1 $RNG | hexdump -ve '/1 "%02x"')
-		# generate another random byte to complete BSSID for OWE network
-		BSSIDB=$BSSIDA
-		while [ "$BSSIDA" = "$BSSIDB" ]; do BSSIDB=$(head -c1 $RNG | hexdump -ve '/1 "%02x"'); done
+		# generate two different random OUI prefixes indicating LA range (because some radios/drivers won't accept multiple BSSIDs with identical first byte)
+		unset BSSIDA; while [ -z "$(echo \"$BSSIDA\" | grep -E '[0-9a-fA-F][26aeAE]')" ]; do BSSIDA=$(head -c1 $RNG | hexdump -ve '/1 "%02x"'); done
+		BSSIDB=$BSSIDA; while [ "$BSSIDA" = "$BSSIDB" -o -z "$(echo \"$BSSIDB\" | grep -E '[0-9a-fA-F][26aeAE]')" ]; do BSSIDB=$(head -c1 $RNG | hexdump -ve '/1 "%02x"'); done
+		# generate the two missing bytes for completing the OUI
+		BSSIDO=$(head -c2 $RNG | hexdump -ve '/1 ":%02x"')
+		# complete the OUIs to two full MAC addresses
+		BSSIDA=${BSSIDA}${BSSIDO}$(head -c3 $RNG | hexdump -ve '/1 ":%02x"')
+		BSSIDB=${BSSIDB}${BSSIDO}$(head -c3 $RNG | hexdump -ve '/1 ":%02x"')
 
 		uci batch << EOI
 set wireless.guest_${RADIO}_owe.ssid="${GuestWiFi_SSID}_OWE"
 set wireless.guest_${RADIO}_owe.hidden='1'
-set wireless.guest_${RADIO}.macaddr=${BSSID}${BSSIDA}
+set wireless.guest_${RADIO}.macaddr=${BSSIDA}
 set wireless.guest_${RADIO}.owe_transition_ssid="${GuestWiFi_SSID}_OWE"
-set wireless.guest_${RADIO}.owe_transition_bssid=${BSSID}${BSSIDB}
-set wireless.guest_${RADIO}_owe.macaddr=${BSSID}${BSSIDB}
+set wireless.guest_${RADIO}.owe_transition_bssid=${BSSIDB}
+set wireless.guest_${RADIO}_owe.macaddr=${BSSIDB}
 set wireless.guest_${RADIO}_owe.owe_transition_ssid="${GuestWiFi_SSID}"
-set wireless.guest_${RADIO}_owe.owe_transition_bssid=${BSSID}${BSSIDA}
+set wireless.guest_${RADIO}_owe.owe_transition_bssid=${BSSIDA}
 EOI
 	}
 
@@ -382,5 +381,6 @@ chmod 755 /sbin/guest_wifi
 
 /etc/init.d/odhcpd restart >/dev/null 2>&1
 /etc/init.d/dnsmasq restart >/dev/null 2>&1
-/etc/init.d/firewall restart >/dev/null 2>&1
+/etc/init.d/firewall stop >/dev/null 2>&1
+/etc/init.d/firewall start >/dev/null 2>&1
 /sbin/guest_wifi enable
