@@ -340,7 +340,7 @@ uci commit firewall
 
 # setup init script to bring guest wifi up/down
 
-	cat<<'EOF' > /sbin/guest_wifi
+cat<<'EOF' > /sbin/guest_wifi
 #! /bin/sh
 
 unset DISABLED
@@ -378,6 +378,7 @@ for RADIO in $RADIOS; do wifi up $RADIO; done
 EOF
 
 chmod 755 /sbin/guest_wifi
+echo "/sbin/guest_wifi" >> /etc/sysupgrade.conf
 
 /etc/init.d/odhcpd restart >/dev/null 2>&1
 /etc/init.d/dnsmasq restart >/dev/null 2>&1
