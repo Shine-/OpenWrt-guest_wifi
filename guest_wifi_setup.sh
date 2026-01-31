@@ -90,7 +90,8 @@ unset CC
 		SNAPSHOT) [ -n "$REV" ] && [ "$REV" -lt "19805" ] && use_OWE_flag='1' || use_OWE_flag='2' ;;
 		*) use_OWE_flag='2' ;;
 	esac
-	[ -z "$({ opkg list-installed wpad*; opkg list-installed hostapd*; } | cut -f 1 -d ' ' | grep -E '^hostapd$|^wpad$|ssl$|tls$')" ] && use_OWE_flag='0'
+	>/dev/null which apk && PKGLIST="$({ apk -q list --installed wpad*; apk -q list --installed hostapd*; } | grep -E '^hostapd$|^wpad$|ssl$|tls$')" || PKGLIST="$({ opkg list-installed wpad*; opkg list-installed hostapd*; } | cut -f 1 -d ' ' | grep -E '^hostapd$|^wpad$|ssl$|tls$')"
+	[ -z "$PKGLIST" ] && use_OWE_flag='0'
 }
 
 # determine whether to use predefined IP address and subnet (minimum allowed size is /29) or generate random 10.x.x.1/24
@@ -177,7 +178,10 @@ ALLRADIOS=$(config_foreach echo 'wifi-device')
 for RADIO in $ALLRADIOS; do
 
 	# disable default "OpenWrt" SSID if present
-	[ "$(uci -q get wireless.default_$RADIO.ssid)" = "OpenWrt" ] && [ "$(uci -q get wireless.default_$RADIO.encryption)" = "none" ] && uci set wireless.default_$RADIO.disabled='1'
+	[ "$(uci -q get wireless.default_$RADIO.ssid)" = "OpenWrt" ] && {
+		unset OPENWRT; OPENWRT="$(uci -q get wireless.default_$RADIO.encryption)"
+		[ -z "${OPENWRT##none}" -o -z "${OPENWRT##open}" ] && uci set wireless.default_$RADIO.disabled='1'
+	}
 
 	uci -q delete wireless.guest_${RADIO}
 	uci -q delete wireless.guest_${RADIO}_owe
