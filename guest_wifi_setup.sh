@@ -177,17 +177,21 @@ ALLRADIOS=$(config_foreach echo 'wifi-device')
 
 for RADIO in $ALLRADIOS; do
 
+	# check whether we're dealing with a 6GHz radio because unencrypted SSIDs aren't possible in 6GHz
+	[ "$(uci -q get wireless.$RADIO.band)" = "6g" ] && is_6G='1' || unset is_6G
+
 	# disable default "OpenWrt" SSID if present
 	[ "$(uci -q get wireless.default_$RADIO.ssid)" = "OpenWrt" ] && {
-		unset OPENWRT; OPENWRT="$(uci -q get wireless.default_$RADIO.encryption)"
+		OPENWRT="$(uci -q get wireless.default_$RADIO.encryption)"
 		[ -z "${OPENWRT##none}" -o -z "${OPENWRT##open}" ] && uci set wireless.default_$RADIO.disabled='1'
+		[ -z "${OPENWRT##owe}" -a -n "${is_6G}" ] && uci set wireless.default_$RADIO.disabled='1'
 	}
 
 	uci -q delete wireless.guest_${RADIO}
 	uci -q delete wireless.guest_${RADIO}_owe
 
 	# create Open Network (unencrypted) SSID
-	[ "${use_OWE_flag}" = "3" ] || {
+	[ "${use_OWE_flag}" = "3" -o -n "${is_6G}" ] || {
 		IFNAMEA="guest$(head -c2 $RNG | hexdump -ve '/1 "%02x"' | tr a-f A-F)"
 		uci batch << EOI
 set wireless.guest_${RADIO}=wifi-iface
@@ -221,7 +225,7 @@ EOI
 	}
 
 	# enable OWE transition using randomly generated BSSIDs (requires OpenWrt 19.07 or later)
-	[ "${use_OWE_flag}" = "1" ] && {
+	[ "${use_OWE_flag}" = "1" -a -z "${is_6G}" ] && {
 
 		# generate two different random OUI prefixes indicating LA range (because some radios/drivers won't accept multiple BSSIDs with identical first byte)
 		unset BSSIDA; while [ -z "$(echo \"$BSSIDA\" | grep -E '[0-9a-fA-F][26aeAE]')" ]; do BSSIDA=$(head -c1 $RNG | hexdump -ve '/1 "%02x"'); done
@@ -245,7 +249,7 @@ EOI
 	}
 
 	# enable OWE transition management (SSID/BSSID) by OpenWrt (requires OpenWrt 22.03.0-rc5 or later)
-	[ "${use_OWE_flag}" = "2" ] && {
+	[ "${use_OWE_flag}" = "2" -a -z "${is_6G}" ] && {
 
 		uci batch << EOI
 set wireless.guest_${RADIO}_owe.ssid="${GuestWiFi_SSID}_OWE"
@@ -265,9 +269,13 @@ config_load wireless
 
 for RADIO in $ALLRADIOS; do
 
-	# set country code if necessary
+	# set country code if desired or previously unset
 	[ -n "$Country_Code" ] && uci set wireless.${RADIO}.country="$Country_Code"
-	[ -n "$CC" -a -z "$(uci -q get wireless.$RADIO.country)" ] && uci set wireless.${RADIO}.country="$CC"
+	[ -n "$CC" ] && {
+		COUNTRY="$(uci -q get wireless.$RADIO.country)"
+		# missing country code or "00" (for 6GHz, 25.12-rc2 or later) means country is unset
+		[ -z "${COUNTRY##00}" ] && uci set wireless.${RADIO}.country="$CC"
+	}
 
 	# in case we don't have any enabled WiFi SSIDs, we can safely enable the physical radio, so our Guest SSID will come online automatically later
 	[ "$(for I in `config_foreach echo wifi-iface`; do [ "$(uci -q get wireless.$I.device)" = "$RADIO" ] && echo "0$(uci -q get wireless.$I.disabled)"; done | uniq)" = "01" ] && uci -q delete wireless.${RADIO}.disabled
